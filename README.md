@@ -1,438 +1,134 @@
-<h1 align="center">Deep-Live-Cam 2.1.6</h1>
+<h1 align="center">Deep-Boost-Cam</h1>
 
 <p align="center">
-  Real-time face swap and video deepfake with a single click and only a single image.
+  <b>Ускоренная и прокачанная версия <a href="https://github.com/hacksider/Deep-Live-Cam">Deep-Live-Cam</a> для видеокарт NVIDIA</b><br>
+  TensorRT · Face Tracking 2.0 · HyperSwap 256 · свои DFM-модели · виртуальная камера для OBS · установка в один клик
 </p>
 
 <p align="center">
-<a href="https://trendshift.io/repositories/11395" target="_blank"><img src="https://trendshift.io/api/badge/repositories/11395" alt="hacksider%2FDeep-Live-Cam | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+  <img src="https://img.shields.io/badge/GPU-NVIDIA%20only-76B900?logo=nvidia&logoColor=white">
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white">
+  <img src="https://img.shields.io/badge/TensorRT-10.13-76B900">
+  <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0-lightgrey">
 </p>
 
 <p align="center">
-  <img src="media/demo.gif" alt="Demo GIF" width="800">
+  <img src="media/boost/main.png" width="360">
+  <img src="media/boost/settings_faces.png" width="470">
 </p>
 
-##  Disclaimer
+> ⚠️ **Только NVIDIA.** Нужна видеокарта NVIDIA GeForce GTX 16xx / RTX 20xx или новее (лучше всего RTX 30/40/50) и свежий драйвер (**570+**). На AMD, Intel и Mac эта сборка не рассчитана — используйте [оригинал](https://github.com/hacksider/Deep-Live-Cam).
 
-This deepfake software is designed to be a productive tool for the AI-generated media industry. It can assist artists in animating custom characters, creating engaging content, and even using models for clothing design.
+---
 
-We are aware of the potential for unethical applications and are committed to preventative measures. A built-in check prevents the program from processing inappropriate media (nudity, graphic content, sensitive material like war footage, etc.). We will continue to develop this project responsibly, adhering to the law and ethics. We may shut down the project or add watermarks if legally required.
+## 🚀 Установка (3 шага)
 
-- Ethical Use: Users are expected to use this software responsibly and legally. If using a real person's face, obtain their consent and clearly label any output as a deepfake when sharing online.
+1. **Скачайте** проект: зелёная кнопка **Code → Download ZIP** и распакуйте в папку без лишних сложностей в пути (например `D:\Deep-Boost-Cam`). Или `git clone https://github.com/Demosand/Deep-Boost-Cam.git`.
+2. **Запустите `installer\Install.bat`** (двойной клик). Установщик сам:
+   - проверит видеокарту и драйвер;
+   - найдёт или предложит установить **Python 3.11** (через winget);
+   - создаст отдельное окружение `.venv` **внутри папки программы**;
+   - поставит все библиотеки точно тех версий, что проверены (PyTorch CUDA 12.8, ONNX Runtime GPU 1.26, готовый insightface — компилятор не нужен);
+   - установит и настроит **TensorRT 10.13** (подобран под ONNX Runtime 1.26 — не «последний», а совместимый);
+   - скачает модели (рекомендуемые ~1.8 ГБ или все ~4.5 ГБ);
+   - подстроит настройки под объём видеопамяти (на 8 ГБ — экономнее);
+   - проверит, что CUDA и TensorRT реально работают, и создаст ярлык на рабочем столе.
+3. **Запустите `Start-DeepBoostCam.bat`** (или ярлык «Deep-Boost-Cam»).
 
-- Content Restrictions: The software includes built-in checks to prevent processing inappropriate media, such as nudity, graphic content, or sensitive material.
+Первая загрузка — около 6–8 ГБ. Установщик можно запускать повторно: он доставит только недостающее (так же — после обновления программы).
 
-- Legal Compliance: We adhere to all relevant laws and ethical guidelines. If legally required, we may shut down the project or add watermarks to the output.
+> 💡 Всё (модели, кэши, временные файлы, движки TensorRT) хранится **только внутри папки программы** — ничего не разбрасывается по системе. Удалить программу = удалить папку.
 
-- User Responsibility: We are not responsible for end-user actions. Users must ensure their use of the software aligns with ethical standards and legal requirements.
+### Обновления
+При запуске программа сама проверяет, вышла ли новая версия на GitHub, и предлагает **«Установить»** — откроется страница релиза. Скачайте новую версию поверх старой и снова запустите `installer\Install.bat`. Проверку можно отключить: *Расширенные настройки → Ускорение → Обновления*.
 
-By using this software, you agree to these terms and commit to using it in a manner that respects the rights and dignity of others.
+---
 
-Users are expected to use this software responsibly and legally. If using a real person's face, obtain their consent and clearly label any output as a deepfake when sharing online. We are not responsible for end-user actions.
+## ✨ Чем отличается от оригинального Deep-Live-Cam
 
-## Pre-built Deep-Live-Cam 2.8 Ultimate!
+| | Deep-Live-Cam (оригинал) | **Deep-Boost-Cam** |
+|---|---|---|
+| Установка | вручную: Python, pip, CUDA-библиотеки, сборка insightface | **один bat-файл**, всё в папке программы |
+| Ускорение | CUDA | **TensorRT FP16/FP32** (точность подобрана для каждой модели), сборка движков заранее |
+| Модели замены | inswapper 128 | inswapper 128, **HyperSwap 1A/1B/1C 256**, **ReSwapper 256**, **свои DFM** |
+| Свои модели лица | нет | **DFM-студия**: обучение своей модели на вашей видеокарте (DF / LIAE, GAN, запись с камеры) |
+| Трекинг | детекция через кадр | **Face Tracking 2.0**: optical flow, сглаживание, удержание с автосбросом |
+| Задержка | обработка = показ | **репроекция**: лицо следует за головой с частотой камеры даже при тяжёлой обработке |
+| Реалистичность | базовая | адаптивная маска, подгонка цвета, стабилизация, сохранение глаз/рта, **зерно и резкость под камеру** |
+| Маски | рот | **части лица** (лоб, брови, глаза, нос, щёки, рот, подбородок), **окклюзии** (руки, микрофон) |
+| Переходы | нет | **Face Fader**: плавное вкл/выкл и «перетекание» в другое лицо, **библиотека лиц** |
+| Повороты головы | артефакты | **плавный отказ от замены в профиль** по реальному углу головы |
+| Вывод | окно | **виртуальная камера OBS**, апскейлер ×2 (лицо / кадр), **интерполяция 30→60 к/с** |
+| Интерфейс | одно окно | окно **расширенных настроек** (6 вкладок), полностью на русском |
+
+**Все новые функции по умолчанию выключены** — программа сначала работает как оригинал, а вы включаете нужное в *⚙ Расширенные настройки*.
 
 <p align="center">
-  <a href="https://deeplivecam.net/index.php/quickstart">
-    <img src="https://github.com/user-attachments/assets/fa2cdf79-c933-4b93-844a-b087192261ed" width="100%" alt="Lite / Ultimate Download Banner">
-  </a>
+  <img src="media/boost/settings_tracking.png" width="420">
+  <img src="media/boost/settings_realism.png" width="420">
+  <img src="media/boost/settings_masks.png" width="420">
+  <img src="media/boost/settings_output.png" width="420">
 </p>
 
-<p align="center">
-<a href="https://deeplivecam.net/index.php/plans/nvidia-gpu?plan_id=0&group_id=1">
-  <img src="https://github.com/user-attachments/assets/56b61811-3a1e-4672-9b50-cf7f6e8e6852" width="40" alt="Windows">
-</a>
-  &nbsp;&nbsp;&nbsp;
-<a href="https://deeplivecam.net/index.php/plans/nvidia-gpu?plan_id=0&group_id=2">
-  <img src="https://github.com/user-attachments/assets/6538e3a6-c957-431a-b586-2d6abcf534dc" width="34" alt="Mac Silicon">
-</a>
-  &nbsp;&nbsp;&nbsp;
-<a href="https://deeplivecam.net/index.php/plans/nvidia-gpu?plan_id=0&group_id=3">
-  <img src="https://github.com/user-attachments/assets/ad45142e-426c-4364-a2a9-a512670cc62c" width="40" alt="CPU">
-</a>
-</p>
+---
 
-<p align="center">
-  <strong>Windows • Mac Silicon • CPU • NVIDIA • AMD</strong>
-</p>
+## ⚡ Скорость (RTX 5060 Ti 16 ГБ, камера 720p)
 
-<p align="center">
-  Builds optimized for your hardware.
-</p>
+| Что | CUDA | TensorRT |
+|---|---|---|
+| Детекция лица | 6.2 мс | **1.95 мс** |
+| Замена Inswapper 128 | 15.5 мс | **8.4 мс** |
+| Замена HyperSwap 256 | 12 мс | **8.3 мс** |
+| Улучшение GPEN-256 | 10 мс | **4.8 мс** |
+| Окклюзии (XSeg) | 7.3 мс | **3.9 мс** |
+| HyperSwap + GPEN-256 на экране | 15 к/с | **24 к/с**, с репроекцией **29 к/с** |
 
-<p align="center">
-  <a href="https://deeplivecam.net/index.php/quickstart">
-    <img src="media/Download.png" width="280" alt="Download">
-  </a>
-</p>
+При первом использовании каждой модели TensorRT собирает «движок» (0.5–4 мин, один раз). Чтобы не ждать во время эфира: *Ускорение → Собрать движки сейчас*.
 
-> **Ultimate** includes **30+ exclusive features**, performance optimizations, and **priority support** We only have a single official website which is https://deeplivecam.net . Please be careful on where you download other versions of this application aside from that website and this github repo.
+### Видеокарты с 8 ГБ памяти
+Работает. Рекомендуется: **HyperSwap 1B или Inswapper + GPEN-256**, TensorRT включён. GFPGAN и ReSwapper 256 тяжёлые; апскейлер и интерполяцию лучше не включать одновременно. В DFM-студии — batch 4–6. Установщик сам уменьшает память под сборку движков TensorRT.
 
-Perfect if you want the fastest setup with **zero manual installation**, pre-configured dependencies, and optimized builds for every supported platform.
+---
 
-## TLDR; Live Deepfake in just 3 Clicks
-![easysteps](https://github.com/user-attachments/assets/af825228-852c-411b-b787-ffd9aac72fc6)
-1. Select a face
-2. Select which camera to use
-3. Press live!
+## 🎥 Как пользоваться
 
-## Features & Uses - Everything is in real-time
+1. **Выберите лицо** (фото человека) — или лицо из **библиотеки**, или DFM-модель в «Модель замены».
+2. Выберите камеру и нажмите **«В реальном времени»**.
+3. Для эфира/созвона: включите **«Виртуальная камера (OBS)»** и выберите камеру *OBS Virtual Camera* в Discord / Zoom / браузере / OBS (нужен установленный [OBS Studio](https://obsproject.com/)).
+4. Тонкая настройка — *⚙ Расширенные настройки*; у каждой опции есть пояснение.
 
-### Mouth Mask
+### DFM-студия — своя модель лица
+DeepFaceLab не работает на RTX 50 (Blackwell), поэтому обучение переписано на PyTorch. Добавьте видео человека и запишите себя прямо с камеры (с подсказками) → «Нарезать лица» → «Начать обучение» → «Экспорт .dfm». Готовые модели DeepFaceLive (`.dfm`) тоже подходят — положите их в `models\dfm`.
 
-**Retain your original mouth for accurate movement using Mouth Mask**
+<p align="center"><img src="media/boost/dfm_studio.png" width="560"></p>
 
-<p align="center">
-  <img src="media/ludwig.gif" alt="resizable-gif">
-</p>
+---
 
-### Face Mapping
+## 🛠 Если что-то не так
 
-**Use different faces on multiple subjects simultaneously**
+| Проблема | Решение |
+|---|---|
+| «Не найден драйвер NVIDIA» | Установите свежий драйвер с nvidia.com |
+| CUDA «не работает» в проверке | Обновите драйвер до 570+ и перезапустите установщик |
+| Первый запуск Live «завис» | Идёт сборка движка TensorRT (до нескольких минут), это один раз |
+| Нет «OBS Virtual Camera» | Установите OBS Studio; не включайте одновременно виртуальную камеру внутри OBS |
+| Видео-режим не сохраняет файл | Нужен ffmpeg: `winget install Gyan.FFmpeg` (Live работает без него) |
+| После обновления драйвера стало медленнее | *Ускорение → Очистить кэш движков* |
 
-<p align="center">
-  <img src="media/streamers.gif" alt="face_mapping_source">
-</p>
+---
 
-### Your Movie, Your Face
+## ⚖️ Ответственное использование
 
-**Watch movies with any face in real-time**
+Программа для творчества, контента и экспериментов **с вашим собственным лицом или с согласия человека**. Не выдавайте себя за реальных людей без их согласия, не используйте для обмана, мошенничества и материалов без согласия. Соблюдайте законы своей страны. Модели распространяются по своим лицензиям, многие — **только для некоммерческого исследовательского использования** (в т.ч. insightface).
 
-<p align="center">
-  <img src="media/movie.gif" alt="movie">
-</p>
+## 🙏 Благодарности и лицензии
 
-### Live Show
+- [hacksider/Deep-Live-Cam](https://github.com/hacksider/Deep-Live-Cam) — основа проекта (AGPL-3.0). Оригинальный README: [docs/README-Deep-Live-Cam.md](docs/README-Deep-Live-Cam.md)
+- [deepinsight/insightface](https://github.com/deepinsight/insightface) — анализ лица и inswapper (некоммерческое использование)
+- [FaceFusion assets](https://github.com/facefusion/facefusion-assets) — HyperSwap, XSeg, BiSeNet, SPAN, Real-ESRGAN
+- [somanchiu/ReSwapper](https://github.com/somanchiu/ReSwapper) (AGPL-3.0), [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) (MIT), Real-ESRGAN (BSD-3)
+- [beekamai/DeepLiveCam](https://github.com/beekamai/DeepLiveCam) (AGPL-3.0) — идеи для TensorRT, XSeg и HyperSwap
+- Архитектура DFM — по мотивам DeepFaceLab / DeepFaceLive (iperov)
 
-**Run Live shows and performances**
-
-<p align="center">
-  <img src="media/live_show.gif" alt="show">
-</p>
-
-### Memes
-
-**Create Your Most Viral Meme Yet**
-
-<p align="center">
-  <img src="media/meme.gif" alt="show" width="450"> 
-  <br>
-  <sub>Created using Many Faces feature in Deep-Live-Cam</sub>
-</p>
-
-### Omegle
-
-**Surprise people on Omegle**
-
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/2e9b9b82-fa04-4b70-9f56-b1f68e7672d0" width="450" controls></video>
-</p>
-
-## Installation (Manual)
-
-**Please be aware that the installation requires technical skills and is not for beginners. Consider downloading the quickstart version.**
-
-<details>
-<summary>Click to see the process</summary>
-
-### Installation
-
-This is more likely to work on your computer but will be slower as it utilizes the CPU.
-
-**1. Set up Your Platform**
-
--   Python (3.14 recommended; 3.11-3.14 supported)
--   pip
--   git
--   [ffmpeg](https://www.youtube.com/watch?v=OlNWCpFdVMA) - ```iex (irm ffmpeg.tc.ht)```
--   [Visual Studio 2022 Runtimes (Windows)](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-
-**2. Clone the Repository**
-
-```bash
-git clone --depth 1 https://github.com/hacksider/Deep-Live-Cam.git
-cd Deep-Live-Cam
-```
-
-**3. Download the Models**
-
-1. [gfpgan-1024.onnx](https://huggingface.co/hacksider/deep-live-cam/resolve/main/gfpgan-1024.onnx)
-2. [inswapper\_128\_fp16.onnx](https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128_fp16.onnx)
-
-Place these files in the "**models**" folder.
-
-**4. Install Dependencies**
-
-We highly recommend using a `venv` to avoid issues.
-
-
-For Windows:
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-```
-For Linux:
-```bash
-# Ensure you use the installed Python 3.14
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-**For macOS:**
-
-Apple Silicon (M1 through M5) requires specific setup:
-
-```bash
-# Install Python 3.14
-brew install python@3.14
-
-# Install tkinter package (required for the GUI)
-brew install python-tk@3.14
-
-# Create and activate virtual environment with Python 3.14
-python3.14 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-** In case something goes wrong and you need to reinstall the virtual environment **
-
-```bash
-# Deactivate the virtual environment
-rm -rf venv
-
-# Reinstall the virtual environment
-python -m venv venv
-source venv/bin/activate
-
-# install the dependencies again
-pip install -r requirements.txt
-
-# gfpgan and basicsrs issue fix
-pip install git+https://github.com/xinntao/BasicSR.git@master
-pip uninstall gfpgan -y
-pip install git+https://github.com/TencentARC/GFPGAN.git@master
-```
-
-**Run:** If you don't have a GPU, you can run Deep-Live-Cam using `python run.py`. Note that initial execution will download models (~300MB).
-
-### GPU Acceleration
-
-**CUDA Execution Provider (Nvidia)**
-
-1. Install [CUDA Toolkit 12.8.0](https://developer.nvidia.com/cuda-12-8-0-download-archive)
-2. Install [cuDNN v8.9.7 for CUDA 12.x](https://developer.nvidia.com/rdp/cudnn-archive) (required for onnxruntime-gpu):
-   - Download cuDNN v8.9.7 for CUDA 12.x
-   - Make sure the cuDNN bin directory is in your system PATH
-3. Install dependencies:
-
-```bash
-pip install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-pip uninstall onnxruntime onnxruntime-gpu
-pip install onnxruntime-gpu==1.26.0
-```
-
-3. Usage:
-
-```bash
-python run.py --execution-provider cuda
-```
-
-**CoreML Execution Provider (Apple Silicon)**
-
-Apple Silicon (M1 through M5) specific installation:
-
-1. Make sure you've completed the macOS setup above using Python 3.14.
-2. No extra install step is needed — `requirements.txt` pulls the official
-   `onnxruntime` build, whose macOS wheels ship the CoreML execution provider.
-   If you previously installed the unmaintained `onnxruntime-silicon` fork,
-   remove it first, as it shadows the real package:
-
-```bash
-pip uninstall onnxruntime-silicon
-pip install -r requirements.txt
-```
-
-3. Usage:
-
-```bash
-python3.14 run.py --execution-provider coreml
-```
-
-**Important Notes for macOS:**
-- Python 3.11 is the minimum (onnxruntime dropped 3.10); 3.14 is recommended
-- Always run with `python3.14` command not just `python` if you have multiple Python versions installed
-- If you get error about `_tkinter` missing, reinstall the tkinter package: `brew reinstall python-tk@3.14`
-- If you get model loading errors, check that your models are in the correct folder
-- If you encounter conflicts with other Python versions, consider uninstalling them:
-  ```bash
-  # List all installed Python versions
-  brew list | grep python
-
-  # Uninstall conflicting versions if needed
-  brew uninstall --ignore-dependencies python@3.11
-
-  # Keep only Python 3.14
-  brew cleanup
-  ```
-
-**CoreML Execution Provider (Apple Legacy)**
-
-1. Install dependencies:
-
-```bash
-pip uninstall onnxruntime onnxruntime-coreml
-pip install onnxruntime-coreml==1.21.0
-```
-
-2. Usage:
-
-```bash
-python run.py --execution-provider coreml
-```
-
-**DirectML Execution Provider (Windows)**
-
-1. Install dependencies:
-
-```bash
-pip uninstall onnxruntime onnxruntime-directml
-pip install onnxruntime-directml==1.21.0
-```
-
-2. Usage:
-
-```bash
-python run.py --execution-provider dml
-```
-
-**OpenVINO™ Execution Provider (Intel)**
-
-1. Install dependencies:
-
-```bash
-pip uninstall onnxruntime onnxruntime-openvino
-pip install onnxruntime-openvino==1.21.0
-```
-
-**Note:** `onnxruntime-openvino` newer than 1.21.0 must be installed together with `openvino`, and the two versions must correspond one-to-one. The supported pairings are:
-
-| onnxruntime-openvino | OpenVINO |
-| --- | --- |
-| 1.24.1 | 2025.4.1 |
-| 1.23.0 | 2025.3 |
-| 1.22.0 | 2025.1 |
-
-```bash
-# Example: onnxruntime-openvino 1.24.1 pairs with OpenVINO 2025.4.1
-pip install openvino==2025.4.1
-pip install onnxruntime-openvino==1.24.1
-```
-
-See the [OpenVINO Execution Provider requirements](https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html#requirements) for the full version-mapping details.
-
-2. Usage:
-
-```bash
-python run.py --execution-provider openvino
-```
-</details>
-
-## Usage
-
-**1. Image/Video Mode**
-
--   Execute `python run.py`.
--   Choose a source face image and a target image/video.
--   Click "Start".
--   The output will be saved in a directory named after the target video.
-
-**2. Webcam Mode**
-
--   Execute `python run.py`.
--   Select a source face image.
--   Click "Live".
--   Wait for the preview to appear (10-30 seconds).
--   Use a screen capture tool like OBS to stream.
--   To change the face, select a new source image.
-
-## Download all models in this huggingface link
-- [**Download models here**](https://huggingface.co/hacksider/deep-live-cam/tree/main)
-
-## Command Line Arguments (Unmaintained)
-
-```
-options:
-  -h, --help                                               show this help message and exit
-  -s SOURCE_PATH, --source SOURCE_PATH                     select a source image
-  -t TARGET_PATH, --target TARGET_PATH                     select a target image or video
-  -o OUTPUT_PATH, --output OUTPUT_PATH                     select output file or directory
-  --frame-processor FRAME_PROCESSOR [FRAME_PROCESSOR ...]  frame processors (choices: face_swapper, face_enhancer, ...)
-  --keep-fps                                               keep original fps
-  --keep-audio                                             keep original audio
-  --keep-frames                                            keep temporary frames
-  --many-faces                                             process every face
-  --map-faces                                              map source target faces
-  --mouth-mask                                             mask the mouth region
-  --video-encoder {libx264,libx265,libvpx-vp9}             adjust output video encoder
-  --video-quality [0-51]                                   adjust output video quality
-  --live-mirror                                            the live camera display as you see it in the front-facing camera frame
-  --live-resizable                                         the live camera frame is resizable
-  --max-memory MAX_MEMORY                                  maximum amount of RAM in GB
-  --execution-provider {cpu} [{cpu} ...]                   available execution provider (choices: cpu, ...)
-  --execution-threads EXECUTION_THREADS                    number of execution threads
-  -v, --version                                            show program's version number and exit
-```
-
-Looking for a CLI mode? Using the -s/--source argument will make the run program in cli mode.
-
-## Press
-
- - [**Ars Technica**](https://arstechnica.com/information-technology/2024/08/new-ai-tool-enables-real-time-face-swapping-on-webcams-raising-fraud-concerns/) - *"Deep-Live-Cam goes viral, allowing anyone to become a digital doppelganger"*
- - [**Yahoo!**](https://www.yahoo.com/tech/ok-viral-ai-live-stream-080041056.html) - *"OK, this viral AI live stream software is truly terrifying"*
- - [**CNN Brasil**](https://www.cnnbrasil.com.br/tecnologia/ia-consegue-clonar-rostos-na-webcam-entenda-funcionamento/) - *"AI can clone faces on webcam; understand how it works"*
- - [**Bloomberg Technoz**](https://www.bloombergtechnoz.com/detail-news/71032/kenalan-dengan-teknologi-deep-live-cam-bisa-jadi-alat-menipu) - *"Get to know Deep Live Cam technology, it can be used as a tool for deception."*
- - [**TrendMicro**](https://www.trendmicro.com/vinfo/gb/security/news/cyber-attacks/ai-vs-ai-deepfakes-and-ekyc) - *"AI vs AI: DeepFakes and eKYC"*
- - [**PetaPixel**](https://petapixel.com/2024/08/14/deep-live-cam-deepfake-ai-tool-lets-you-become-anyone-in-a-video-call-with-single-photo-mark-zuckerberg-jd-vance-elon-musk/) - *"Deepfake AI Tool Lets You Become Anyone in a Video Call With Single Photo"*
- - [**SomeOrdinaryGamers**](https://www.youtube.com/watch?time_continue=1074&v=py4Tc-Y8BcY) - *"That's Crazy, Oh God. That's Fucking Freaky Dude... That's So Wild Dude"*
- - [**IShowSpeed**](https://www.youtube.com/live/mFsCe7AIxq8?feature=shared&t=2686) - *"Alright look look look, now look chat, we can do any face we want to look like chat"*
- - [**TechLinked (Linus Tech Tips)**](https://www.youtube.com/watch?v=wnCghLjqv3s&t=551s) - *"They do a pretty good job matching poses, expression and even the lighting"*
- - [**IShowSpeed**](https://youtu.be/JbUPRmXRUtE?t=3964) - *"What the F***! Why do I look like Vinny Jr? I look exactly like Vinny Jr!? No, this shit is crazy! Bro This is F*** Crazy!"*
-
-
-## Credits
-
--   [ffmpeg](https://ffmpeg.org/): for making video-related operations easy
--   [Henry](https://github.com/henryruhs): One of the major contributor in this repo
--   [deepinsight](https://github.com/deepinsight): for their [insightface](https://github.com/deepinsight/insightface) project which provided a well-made library and models. Please be reminded that the [use of the model is for non-commercial research purposes only](https://github.com/deepinsight/insightface?tab=readme-ov-file#license).
--   [havok2-htwo](https://github.com/havok2-htwo): for sharing the code for webcam
--   [GosuDRM](https://github.com/GosuDRM): for the open version of roop
--   [pereiraroland26](https://github.com/pereiraroland26): Multiple faces support
--   [vic4key](https://github.com/vic4key): For supporting/contributing to this project
--   [kier007](https://github.com/kier007): for improving the user experience
--   [qitianai](https://github.com/qitianai): for multi-lingual support
--   [laurigates](https://github.com/laurigates): Decoupling stuffs to make everything faster!
--   [maxwbuckley](https://github.com/maxwbuckley): For making the effort to optimize this for mac!
--   and [all developers](https://github.com/hacksider/Deep-Live-Cam/graphs/contributors) behind libraries used in this project.
--   Footnote: Please be informed that the base author of the code is [s0md3v](https://github.com/s0md3v/roop)
--   All the wonderful users who helped make this project go viral by starring the repo ❤️
-
-[![Stargazers](https://reporoster.com/stars/hacksider/Deep-Live-Cam)](https://github.com/hacksider/Deep-Live-Cam/stargazers)
-
-## Contributions
-
-![Alt](https://repobeats.axiom.co/api/embed/fec8e29c45dfdb9c5916f3a7830e1249308d20e1.svg "Repobeats analytics image")
-
-## Stars to the Moon 🚀
-
-<a href="https://star-history.com/#hacksider/deep-live-cam&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=hacksider/deep-live-cam&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=hacksider/deep-live-cam&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=hacksider/deep-live-cam&type=Date" />
- </picture>
-</a>
+Лицензия проекта: **AGPL-3.0** (как у оригинала).

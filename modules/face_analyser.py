@@ -125,6 +125,9 @@ def _needs_landmark() -> bool:
     """
     if getattr(modules.globals, "mouth_mask", False):
         return True
+    from modules.processors.frame.realism import needs_landmarks
+    if needs_landmarks():
+        return True
     processors = getattr(modules.globals, "frame_processors", [])
     return any(p in processors for p in
                ("face_enhancer", "face_enhancer_gpen256", "face_enhancer_gpen512"))

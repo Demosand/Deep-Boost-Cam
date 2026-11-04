@@ -17,3 +17,6 @@ opennsfw2==0.18.0
 keras>=3.0.0
 protobuf>=6.33.5,<8
 pygrabber; sys_platform == 'win32'
+pyvirtualcam==0.15.0
+# TensorRT for onnxruntime-gpu 1.26 (CUDA 12.8 build, links nvinfer_10.dll): 10.x for CUDA 12 only.
+# Optional, ~3 GB: pip install "tensorrt-cu12-libs==10.13.3.9"

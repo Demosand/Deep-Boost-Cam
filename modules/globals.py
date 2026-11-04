@@ -92,3 +92,106 @@ capture_resolution: tuple = (640, 480)
 
 import threading
 dml_lock = threading.Lock()
+
+# ─── Extended settings (Settings dialog). Every new feature defaults OFF. ───
+PROJECT_DIR = os.path.dirname(ROOT_DIR)
+
+# Live face detection frequency: run the detector every N frames.
+# 0 = auto (legacy formula: max(1, round(camera_fps * 0.04))).
+det_interval: int = 0
+
+# Face Tracking 2.0 — master switch. Off = legacy "hold last detection".
+tracking_v2: bool = False
+tracking_optical_flow: bool = True     # LK optical flow between detections
+tracking_smoothing: bool = True        # One Euro filter on keypoints
+tracking_smoothing_strength: float = 0.5  # 0 = raw, 1 = very smooth
+tracking_grace_frames: int = 6         # hold a lost face this many frames
+tracking_max_motion: float = 0.25      # max per-frame shift, fraction of face size
+tracking_max_rotation: float = 20.0    # max per-frame roll change, degrees
+tracking_min_confidence: float = 0.5   # below this a detection counts as lost
+tracking_auto_redetect: bool = True    # force detection next frame when tracking fails
+
+# Freeze the output on the last swapped frame when the face is lost,
+# so the real face is never shown.
+freeze_on_face_lost: bool = False
+
+# Realism (all off by default).
+adaptive_face_mask: bool = False       # landmark-shaped blend mask
+adaptive_mask_feather: float = 0.5     # 0..1 feather amount
+color_matching: bool = False           # LAB mean/std transfer to target skin
+color_matching_strength: float = 0.7
+temporal_stabilization: bool = False   # motion-aware blend of swap output
+temporal_strength: float = 0.5
+eye_preservation: bool = False         # blend original eyes (natural blinking)
+eye_preservation_strength: float = 0.4
+mouth_preservation: bool = False       # blend original lips (natural speech)
+mouth_preservation_strength: float = 0.5
+dynamic_enhancement: bool = False      # run face enhancer only when useful
+dynamic_enhancement_min_face: int = 110   # px; smaller faces skip enhancer
+dynamic_enhancement_max_motion: float = 0.08  # fraction of face size per frame
+
+# TensorRT (experimental). Applied on restart: sessions are built at load time.
+use_tensorrt: bool = False
+trt_fp16: bool = True
+trt_builder_optimization_level: int = 3   # 0..5, higher = slower build, faster engine
+trt_max_workspace_gb: int = 4
+trt_timing_cache: bool = True
+trt_cache_dir: str = os.path.join(PROJECT_DIR, "trt_cache")
+
+# ─── Swap model, face parts, occlusion, output (Settings dialog) ───
+# Face swap model key (modules/processors/frame/swapper_models.py).
+swapper_model: str = "inswapper_128"
+# Face-part masks (BiSeNet). Off = whole face swapped as before.
+face_parts_mask: bool = False
+face_parts: Dict[str, bool] = {
+    "forehead": True, "brows": True, "eyes": True, "nose": True,
+    "cheeks": True, "mouth": True, "chin": True,
+}
+face_parts_feather: float = 0.5
+# Occlusion mask (XSeg): hands / mic / objects in front of the face stay real.
+occlusion_mask: bool = False
+# Use the swap model's own face mask (HyperSwap outputs one).
+use_model_mask: bool = False
+# Recompute face-part / occlusion masks every N frames (1 = every frame).
+mask_interval: int = 1
+# Camera capture frame rate requested from the device.
+capture_fps: int = 60
+# Virtual camera output (pyvirtualcam -> OBS Virtual Camera).
+virtual_camera: bool = False
+virtual_camera_resolution: tuple = (0, 0)   # (0, 0) = same as the processed frame
+
+# ─── Multi-photo source, pipeline, reprojection (Settings dialog) ───
+# Several photos of the same person, blended by the target's head pose.
+multi_source: bool = False
+source_paths_extra: List[str] = []
+# Live: run face detection in its own thread, parallel to the swap.
+async_detection: bool = False
+# Live: move the last finished swap onto the newest camera frame (low latency).
+reprojection: bool = False
+
+# Grain & sharpness matching to the camera image (Settings -> Realism).
+grain_matching: bool = False
+grain_amount: float = 1.0            # share of the missing noise added (0..1.5)
+grain_sharpness_amount: float = 0.7  # how far detail is pulled to the camera's (0..1)
+
+# ─── Faces: fader, profile fade, library; upscaler; frame interpolation ───
+# Swap on/off switch (main window button). Always on unless the user turns it off.
+swap_enabled: bool = True
+# Face Fader: ramp swap on/off and morph between identities over N seconds.
+face_fader: bool = False
+fader_seconds: float = 1.5
+# Profile fade: lower the swap past these head angles (degrees, from 1k3d68).
+profile_fade: bool = False
+profile_yaw_start: float = 35.0
+profile_yaw_end: float = 60.0
+profile_pitch_start: float = 25.0
+profile_pitch_end: float = 45.0
+# Super-resolution of the output (x2). mode: "frame" = whole frame, "face" = face only.
+upscaler: bool = False
+upscaler_mode: str = "face"
+upscaler_model: str = "span"
+# Live frame interpolation (RIFE): doubles the output frame rate, +half a frame of latency.
+frame_interpolation: bool = False
+
+# Ask GitHub for a newer Deep-Boost-Cam release at start (on by default).
+check_updates: bool = True

@@ -18,6 +18,11 @@ if sys.platform == "win32":
         _torch_lib = os.path.join(_sp, "torch", "lib")
         if os.path.isdir(_torch_lib):
             _candidate_dirs.append(_torch_lib)
+        # TensorRT 10.x DLLs from the tensorrt-cu12-libs wheel, loaded by
+        # onnxruntime_providers_tensorrt.dll (nvinfer_10.dll) on demand.
+        _trt_lib = os.path.join(_sp, "tensorrt_libs")
+        if os.path.isdir(_trt_lib):
+            _candidate_dirs.append(_trt_lib)
         _nvidia_dir = os.path.join(_sp, "nvidia")
         if os.path.isdir(_nvidia_dir):
             for _pkg in os.listdir(_nvidia_dir):

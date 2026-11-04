@@ -18,6 +18,9 @@ from modules.utilities import (
 from modules.cluster_analysis import find_closest_centroid
 from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize
 from modules.platform_info import OPENVINO_PROVIDER_CONFIG
+from modules.processors.frame import realism, swapper_models
+from modules import face_fader, source_identity
+from modules.processors.frame._onnx_enhancer import tensorrt_provider
 import os
 from collections import deque
 import time
@@ -230,27 +233,75 @@ def pre_start() -> bool:
     return True
 
 
+def _swapper_providers(spec) -> list:
+    providers_config = []
+    for p in modules.globals.execution_providers:
+        if p == "CoreMLExecutionProvider" and IS_APPLE_SILICON:
+            # Enhanced CoreML configuration for M1-M5
+            providers_config.append((
+                "CoreMLExecutionProvider",
+                {
+                    "ModelFormat": "MLProgram",
+                    "MLComputeUnits": "ALL",  # Use Neural Engine + GPU + CPU
+                    "SpecializationStrategy": "FastPrediction",
+                    "AllowLowPrecisionAccumulationOnGPU": 1,
+                    "EnableOnSubgraphs": 1,
+                }
+            ))
+        elif p == "CUDAExecutionProvider":
+            # FP16 only where measured exact for this model (see swapper_models).
+            trt = tensorrt_provider(allow_fp16=spec.trt_fp16_ok)
+            if trt is not None:
+                providers_config.append(trt)
+            # Use bare provider — ONNX Runtime defaults are
+            # fastest on modern GPUs (Blackwell/sm_120).
+            providers_config.append(p)
+        elif p == "OpenVINOExecutionProvider":
+            providers_config.append(OPENVINO_PROVIDER_CONFIG)
+        else:
+            providers_config.append(p)
+    return providers_config
+
+
+def reset_face_swapper() -> None:
+    """Drop the loaded model; the next get_face_swapper() loads the selected one."""
+    global FACE_SWAPPER
+    with THREAD_LOCK:
+        FACE_SWAPPER = None
+        with _cuda_graph_lock:
+            _cuda_graph_session.update(session=None, io_binding=None, inputs=None, recorded=False)
+    realism.reset_state()
+
+
 def get_face_swapper() -> Any:
     global FACE_SWAPPER
 
     with THREAD_LOCK:
         if FACE_SWAPPER is None:
-            # Prefer FP16 on GPUs with Tensor Cores (Turing+) — half the
-            # memory bandwidth, faster inference.  Fall back to FP32 for
-            # older GPUs (e.g. GTX 16xx) where FP16 can produce NaN.
-            fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
-            fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
-            use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)
-            if use_fp16:
-                model_path = fp16_path
-            elif os.path.exists(fp32_path):
-                model_path = fp32_path
+            spec = swapper_models.spec_for(getattr(modules.globals, "swapper_model", ""))
+            if spec.key == swapper_models.DEFAULT_KEY:
+                # Prefer FP16 on GPUs with Tensor Cores (Turing+) — half the
+                # memory bandwidth, faster inference.  Fall back to FP32 for
+                # older GPUs (e.g. GTX 16xx) where FP16 can produce NaN.
+                fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
+                fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
+                use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)
+                if use_fp16:
+                    model_path = fp16_path
+                elif os.path.exists(fp32_path):
+                    model_path = fp32_path
+                else:
+                    if not pre_check():
+                        return None
+                    model_path = fp16_path if os.path.exists(fp16_path) else fp32_path
+                    if not os.path.exists(model_path):
+                        update_status(f"No inswapper model found in {models_dir}.", NAME)
+                        return None
             else:
-                if not pre_check():
-                    return None
-                model_path = fp16_path if os.path.exists(fp16_path) else fp32_path
-                if not os.path.exists(model_path):
-                    update_status(f"No inswapper model found in {models_dir}.", NAME)
+                update_status(f"Preparing {spec.label} (downloads once into models/)...", NAME)
+                model_path = swapper_models.ensure_model_file(spec, models_dir)
+                if model_path is None:
+                    update_status(f"Could not obtain {spec.model_file}.", NAME)
                     return None
             # On Apple Silicon, rewrite Pad(reflect) → Slice+Concat so
             # CoreML can run the entire model in a single partition on
@@ -261,40 +312,30 @@ def get_face_swapper() -> Any:
 
             update_status(f"Loading face swapper model from: {model_path}", NAME)
             try:
-                providers_config = []
-                for p in modules.globals.execution_providers:
-                    if p == "CoreMLExecutionProvider" and IS_APPLE_SILICON:
-                        # Enhanced CoreML configuration for M1-M5
-                        providers_config.append((
-                            "CoreMLExecutionProvider",
-                            {
-                                "ModelFormat": "MLProgram",
-                                "MLComputeUnits": "ALL",  # Use Neural Engine + GPU + CPU
-                                "SpecializationStrategy": "FastPrediction",
-                                "AllowLowPrecisionAccumulationOnGPU": 1,
-                                "EnableOnSubgraphs": 1,
-                            }
-                        ))
-                    elif p == "CUDAExecutionProvider":
-                        # Use bare provider — ONNX Runtime defaults are
-                        # fastest on modern GPUs (Blackwell/sm_120).
-                        providers_config.append(p)
-                    elif p == "OpenVINOExecutionProvider":
-                        providers_config.append(OPENVINO_PROVIDER_CONFIG)
-                    else:
-                        providers_config.append(p)
-                FACE_SWAPPER = insightface.model_zoo.get_model(
-                    model_path,
-                    providers=providers_config,
-                )
-                # Set up CUDA graph session for faster inference
-                if _HAS_TORCH_CUDA and any(
+                providers_config = _swapper_providers(spec)
+                swapper = swapper_models.build(spec, model_path, providers_config)
+                # Set up CUDA graph session for faster inference.
+                # Not with TensorRT: the graph session is CUDA-only and
+                # would silently replace the faster TRT engine.
+                trt_active = "TensorrtExecutionProvider" in swapper.session.get_providers()
+                if trt_active:
+                    print(f"[{NAME}] TensorRT active: {swapper.session.get_providers()}")
+                if not trt_active and spec.cuda_graph and _HAS_TORCH_CUDA and any(
                     p == "CUDAExecutionProvider" or
                     (isinstance(p, tuple) and p[0] == "CUDAExecutionProvider")
                     for p in providers_config
                 ):
-                    _init_cuda_graph_session(model_path, FACE_SWAPPER)
-                update_status("Face swapper model loaded successfully.", NAME)
+                    _init_cuda_graph_session(model_path, swapper)
+                # Warm-up run: a TensorRT engine is built (or loaded) here, at
+                # load time with the status line up, not on the first frame.
+                feeds = {
+                    i.name: np.zeros([d if isinstance(d, int) and d > 0 else 1 for d in i.shape],
+                                     np.float16 if "16" in i.type else np.float32)
+                    for i in swapper.session.get_inputs()
+                }
+                swapper.session.run(None, feeds)
+                FACE_SWAPPER = swapper
+                update_status(f"Face swapper model loaded: {spec.label}", NAME)
             except Exception as e:
                 update_status(f"Error loading face swapper model: {e}", NAME)
                 FACE_SWAPPER = None
@@ -346,11 +387,10 @@ def _get_soft_alpha(size: int) -> np.ndarray:
 _cuda_graph_session = {
     'session': None,
     'io_binding': None,
-    'ort_input': None,
-    'ort_latent': None,
+    'inputs': None,      # input name -> OrtValue on the GPU
     'recorded': False,
 }
-# Serializes CUDA-graph replay. The io_binding + ort_input/ort_latent are
+# Serializes CUDA-graph replay. The io_binding + bound OrtValues are
 # shared across threads and run_with_iobinding mutates GPU-side buffers;
 # concurrent calls would produce wrong output.
 _cuda_graph_lock = threading.Lock()
@@ -361,7 +401,7 @@ class _CudaGraphSessionAdapter:
 
     Routes ``.run()`` through CUDA graph replay when a recorded graph is
     available, and transparently proxies every other attribute to the
-    underlying session so insightface's INSwapper sees an unchanged API.
+    underlying session so the swapper sees an unchanged API.
     """
 
     def __init__(self, underlying):
@@ -371,10 +411,11 @@ class _CudaGraphSessionAdapter:
     def run(self, output_names, input_dict, **kwargs):
         if _cuda_graph_session['recorded']:
             try:
-                keys = list(input_dict.keys())
-                blob = input_dict[keys[0]]
-                latent = input_dict[keys[1]]
-                return [_cuda_graph_swap_inference(blob, latent)]
+                outputs = _cuda_graph_swap_inference(input_dict)
+                if output_names:
+                    names = [o.name for o in self._underlying.get_outputs()]
+                    outputs = [outputs[names.index(n)] for n in output_names]
+                return outputs
             except Exception:
                 pass
         return self._underlying.run(output_names, input_dict, **kwargs)
@@ -391,41 +432,35 @@ def _init_cuda_graph_session(model_path: str, swapper):
 
     CUDA graphs record the GPU kernel launch sequence once, then replay it
     with near-zero CPU overhead on subsequent runs.  Requires static input
-    shapes (inswapper is always 1x3x128x128 + 1x512).
+    shapes (every swap model here is 1x3xSxS + 1x512). Inputs are bound by
+    name, so models with a different input order (HyperSwap: source first)
+    and several outputs (HyperSwap: image + mask) work too.
     """
     import onnxruntime as ort
     try:
         providers = [('CUDAExecutionProvider', {'enable_cuda_graph': '1'})]
         sess = ort.InferenceSession(model_path, providers=providers)
 
-        # Pre-allocate GPU buffers with correct shapes
-        inp_shape = (1, 3, swapper.input_size[1], swapper.input_size[0])
-        latent_shape = (1, 512)
-        dummy_inp = np.zeros(inp_shape, dtype=np.float32)
-        dummy_lat = np.zeros(latent_shape, dtype=np.float32)
-
-        ort_input = ort.OrtValue.ortvalue_from_numpy(dummy_inp, 'cuda', 0)
-        ort_latent = ort.OrtValue.ortvalue_from_numpy(dummy_lat, 'cuda', 0)
-
         io = sess.io_binding()
-        io.bind_ortvalue_input(swapper.input_names[0], ort_input)
-        io.bind_ortvalue_input(swapper.input_names[1], ort_latent)
-        io.bind_output(swapper.output_names[0], 'cuda', 0)
+        inputs = {}
+        for inp in sess.get_inputs():
+            dummy = np.zeros(inp.shape, dtype=np.float32)
+            inputs[inp.name] = ort.OrtValue.ortvalue_from_numpy(dummy, 'cuda', 0)
+            io.bind_ortvalue_input(inp.name, inputs[inp.name])
+        for out in sess.get_outputs():
+            io.bind_output(out.name, 'cuda', 0)
 
         # First run records the CUDA graph
         sess.run_with_iobinding(io)
 
         _cuda_graph_session['session'] = sess
         _cuda_graph_session['io_binding'] = io
-        _cuda_graph_session['ort_input'] = ort_input
-        _cuda_graph_session['ort_latent'] = ort_latent
+        _cuda_graph_session['inputs'] = inputs
         _cuda_graph_session['recorded'] = True
 
         # Wrap swapper.session in an adapter instead of rebinding
-        # session.run. insightface's INSwapper.get() reads .run via the
-        # session attribute, so either works; the adapter survives any
-        # later attribute reads on the session and keeps the original
-        # session object untouched.
+        # session.run. The swapper's get() reads .run via the session
+        # attribute; the adapter keeps the original session untouched.
         if not isinstance(swapper.session, _CudaGraphSessionAdapter):
             swapper.session = _CudaGraphSessionAdapter(swapper.session)
 
@@ -437,17 +472,18 @@ def _init_cuda_graph_session(model_path: str, swapper):
         _cuda_graph_session['recorded'] = False
 
 
-def _cuda_graph_swap_inference(blob: np.ndarray, latent: np.ndarray) -> np.ndarray:
+def _cuda_graph_swap_inference(feeds: dict) -> list:
     """Run swap model via CUDA graph replay — minimal CPU overhead."""
     cg = _cuda_graph_session
     with _cuda_graph_lock:
-        cg['ort_input'].update_inplace(blob)
-        cg['ort_latent'].update_inplace(latent)
+        for name, value in feeds.items():
+            cg['inputs'][name].update_inplace(np.ascontiguousarray(value, dtype=np.float32))
         cg['session'].run_with_iobinding(cg['io_binding'])
-        return cg['io_binding'].get_outputs()[0].numpy()
+        return [o.numpy() for o in cg['io_binding'].get_outputs()]
 
 
-def _fast_paste_back(target_img: Frame, bgr_fake: np.ndarray, aimg: np.ndarray, M: np.ndarray) -> Frame:
+def _fast_paste_back(target_img: Frame, bgr_fake: np.ndarray, aimg: np.ndarray, M: np.ndarray,
+                     soft_alpha: Optional[np.ndarray] = None) -> Frame:
     """Paste bgr_fake back onto target_img via the inverse affine of M.
 
     Restricts work to the face bbox in output coordinates and warps a
@@ -485,27 +521,24 @@ def _fast_paste_back(target_img: Frame, bgr_fake: np.ndarray, aimg: np.ndarray, 
     IM_crop[1, 2] -= y1p
     crop_w, crop_h = x2p - x1p, y2p - y1p
 
-    soft_alpha = _get_soft_alpha(face_h)
+    if soft_alpha is None:
+        soft_alpha = _get_soft_alpha(face_h)
     bgr_fake_crop = cv2.warpAffine(bgr_fake, IM_crop, (crop_w, crop_h), borderMode=cv2.BORDER_REPLICATE)
     alpha_crop = cv2.warpAffine(soft_alpha, IM_crop, (crop_w, crop_h), borderValue=0)
 
     target_crop = target_img[y1p:y2p, x1p:x2p]
+    if modules.globals.grain_matching:
+        bgr_fake_crop = realism.match_grain(bgr_fake_crop, target_crop, alpha_crop)
 
-    if _HAS_TORCH_CUDA:
-        # Scale alpha to [0, 1] on device — cheaper to upload uint8 than float.
-        mask_t = torch.from_numpy(alpha_crop).cuda().float().mul_(1.0 / 255.0).unsqueeze(2)
-        fake_t = torch.from_numpy(bgr_fake_crop).float().cuda()
-        tgt_t = torch.from_numpy(target_crop).float().cuda()
-        blended = (mask_t * fake_t + (1.0 - mask_t) * tgt_t).to(torch.uint8).cpu().numpy()
-        target_img[y1p:y2p, x1p:x2p] = blended
-    else:
-        # Fused uint8 blend via cv2 SIMD — no float32 round-trip.
-        # Measured ~7-8× faster than the old numpy float32 path on a 1000×1000 crop.
-        alpha_3c = cv2.merge([alpha_crop, alpha_crop, alpha_crop])
-        inv_alpha = 255 - alpha_3c
-        a_fake = cv2.multiply(bgr_fake_crop, alpha_3c, scale=1.0 / 255.0)
-        a_tgt = cv2.multiply(target_crop, inv_alpha, scale=1.0 / 255.0)
-        target_img[y1p:y2p, x1p:x2p] = cv2.add(a_fake, a_tgt)
+    # Fused uint8 blend via cv2 SIMD on the CPU. The former torch path paid
+    # 3 host->device uploads + 1 download + a sync per face per frame; measured
+    # on RTX 5060 Ti it was slower at every face size (200px: 0.50 vs 0.10 ms,
+    # 600px: 1.62 vs 1.44 ms) and stalled the GPU stream used by inference.
+    alpha_3c = cv2.merge([alpha_crop, alpha_crop, alpha_crop])
+    inv_alpha = 255 - alpha_3c
+    a_fake = cv2.multiply(bgr_fake_crop, alpha_3c, scale=1.0 / 255.0)
+    a_tgt = cv2.multiply(target_crop, inv_alpha, scale=1.0 / 255.0)
+    target_img[y1p:y2p, x1p:x2p] = cv2.add(a_fake, a_tgt)
 
     return target_img
 
@@ -517,10 +550,17 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
         update_status("Face swapper model not loaded or failed to load. Skipping swap.", NAME)
         return temp_frame
 
-    # Safety check for faces
-    if source_face is None or target_face is None:
+    # Safety check for faces. DFM models carry their own identity.
+    baked_identity = getattr(face_swapper, "always_mask", False)
+    if target_face is None or (source_face is None and not baked_identity):
         return temp_frame
-    if not hasattr(source_face, 'normed_embedding') or source_face.normed_embedding is None:
+    if not baked_identity:
+        source_face = face_fader.blend_identity(source_identity.face_for(source_face, target_face))
+        if getattr(source_face, 'normed_embedding', None) is None:
+            return temp_frame
+    # Face Fader (swap on/off ramp) x profile fade: skip the model entirely at 0.
+    coverage = face_fader.coverage(temp_frame, target_face)
+    if coverage <= 0.003:
         return temp_frame
 
     # _fast_paste_back writes in-place on the GPU path.  Only copy when
@@ -568,7 +608,19 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
         _face_size = face_swapper.input_size[0]
         _aimg_dummy = np.empty((_face_size, _face_size, 3), dtype=np.uint8)
 
-        swapped_frame = _fast_paste_back(temp_frame, bgr_fake, _aimg_dummy, M)
+        alpha = None
+        if realism.any_enabled() or baked_identity:
+            # Must read the pre-swap pixels: run before the in-place paste-back.
+            bgr_fake, alpha = realism.refine(
+                bgr_fake, temp_frame, target_face, M, _get_soft_alpha(_face_size),
+                model_mask=getattr(face_swapper, "last_mask", None),
+                force_model_mask=baked_identity,
+            )
+
+        if coverage < 0.997:
+            base = _get_soft_alpha(_face_size) if alpha is None else alpha
+            alpha = (base.astype(np.float32) * coverage).astype(np.uint8)
+        swapped_frame = _fast_paste_back(temp_frame, bgr_fake, _aimg_dummy, M, alpha)
 
     except Exception as e:
         print(f"Error during face swap: {e}")

@@ -22,7 +22,50 @@ IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine() == "arm6
 THREAD_SEMAPHORE = threading.Semaphore(min(max(1, (os.cpu_count() or 1)), 8))
 
 
-def build_provider_config(providers=None):
+def tensorrt_available() -> bool:
+    return ("TensorrtExecutionProvider" in onnxruntime.get_available_providers()
+            and _tensorrt_libs_dir() is not None)
+
+
+def _tensorrt_libs_dir():
+    import sys
+    d = os.path.join(sys.prefix, "Lib", "site-packages", "tensorrt_libs")
+    if os.path.isfile(os.path.join(d, "nvinfer_10.dll")):
+        return d
+    return None
+
+
+def tensorrt_provider(allow_fp16: bool = True):
+    """TensorRT EP tuple from the Settings values, or None when off/unavailable.
+
+    Engines and the timing cache live in modules.globals.trt_cache_dir (inside
+    the project folder). Engine file names include the GPU arch (sm120) and
+    precision, so switching FP16 on/off keeps both variants cached.
+
+    allow_fp16=False for generative models (inswapper, GFPGAN, GPEN):
+    trt_fp16_enable lets TensorRT drop their FP32 normalisation/modulation
+    layers to FP16, which garbles the output. Measured on RTX 5060 Ti vs CUDA:
+    inswapper_128_fp16 max|diff| 0.457 (flag) vs 0.013 (no flag, still 6.8 ms
+    vs 15.1 ms CUDA); GPEN-256 1.19 vs 0.003; GFPGAN 1.22 vs 0.010. The FP16
+    inswapper keeps its own FP16 precision from the graph without the flag.
+    """
+    if not modules.globals.use_tensorrt or not tensorrt_available():
+        return None
+    cache = modules.globals.trt_cache_dir
+    os.makedirs(cache, exist_ok=True)
+    opts = {
+        "trt_fp16_enable": bool(modules.globals.trt_fp16) and allow_fp16,
+        "trt_engine_cache_enable": True,
+        "trt_engine_cache_path": cache,
+        "trt_timing_cache_enable": bool(modules.globals.trt_timing_cache),
+        "trt_timing_cache_path": cache,
+        "trt_builder_optimization_level": int(modules.globals.trt_builder_optimization_level),
+        "trt_max_workspace_size": str(int(modules.globals.trt_max_workspace_gb) << 30),
+    }
+    return ("TensorrtExecutionProvider", opts)
+
+
+def build_provider_config(providers=None, allow_fp16: bool = True):
     """Wrap raw provider name strings with optimised CUDA / CoreML options.
 
     Providers that are already ``(name, options_dict)`` tuples are passed
@@ -37,6 +80,10 @@ def build_provider_config(providers=None):
             # Already configured – pass through
             config.append(p)
         elif p == "CUDAExecutionProvider":
+            trt = tensorrt_provider(allow_fp16)
+            if trt is not None:
+                # TensorRT first; ORT assigns unsupported nodes to CUDA.
+                config.append(trt)
             # Use bare provider — ONNX Runtime's defaults are fastest on
             # modern GPUs (Blackwell/sm_120).  Custom options like
             # EXHAUSTIVE cudnn_conv_algo_search hurt performance on these
@@ -94,7 +141,7 @@ def run_inference(session: onnxruntime.InferenceSession,
     return session.run(None, {input_name: input_tensor})[0]
 
 
-def create_onnx_session(model_path: str) -> onnxruntime.InferenceSession:
+def create_onnx_session(model_path: str, allow_fp16: bool = False) -> onnxruntime.InferenceSession:
     """Create an ONNX Runtime session with optimised provider config.
 
     On Apple Silicon, applies CoreML graph optimizations (Pad decomposition,
@@ -115,7 +162,9 @@ def create_onnx_session(model_path: str) -> onnxruntime.InferenceSession:
             input_shape = None
         model_path = optimize_for_coreml(model_path, input_shape=input_shape)
 
-    providers = build_provider_config()
+    # Enhancers are generative: FP16 stays off unless a caller measured it
+    # safe for its model (see tensorrt_provider).
+    providers = build_provider_config(allow_fp16=allow_fp16)
     session_options = onnxruntime.SessionOptions()
     session_options.graph_optimization_level = (
         onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL

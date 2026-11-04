@@ -232,21 +232,14 @@ def _paste_back(
 
     target_crop = frame[y1p:y2p, x1p:x2p]
 
-    if _HAS_TORCH_CUDA:
-        # Upload uint8 alpha — smaller transfer, scale on device.
-        mask_t = torch.from_numpy(inv_mask_crop).cuda().float().mul_(1.0 / 255.0).unsqueeze(2)
-        enhanced_t = torch.from_numpy(inv_restored_crop).float().cuda()
-        target_t = torch.from_numpy(target_crop).float().cuda()
-        blended = (mask_t * enhanced_t + (1.0 - mask_t) * target_t
-                   ).to(torch.uint8).cpu().numpy()
-        frame[y1p:y2p, x1p:x2p] = blended
-    else:
-        # Fused uint8 blend via cv2 SIMD — ~7× faster than the float32 round-trip.
-        alpha_3c = cv2.merge([inv_mask_crop, inv_mask_crop, inv_mask_crop])
-        inv_alpha = 255 - alpha_3c
-        a_enh = cv2.multiply(inv_restored_crop, alpha_3c, scale=1.0 / 255.0)
-        a_tgt = cv2.multiply(target_crop, inv_alpha, scale=1.0 / 255.0)
-        frame[y1p:y2p, x1p:x2p] = cv2.add(a_enh, a_tgt)
+    # Fused uint8 blend via cv2 SIMD on the CPU. A torch upload/download
+    # round-trip here was slower for face-sized crops and stalled the GPU
+    # stream (see face_swapper._fast_paste_back for measurements).
+    alpha_3c = cv2.merge([inv_mask_crop, inv_mask_crop, inv_mask_crop])
+    inv_alpha = 255 - alpha_3c
+    a_enh = cv2.multiply(inv_restored_crop, alpha_3c, scale=1.0 / 255.0)
+    a_tgt = cv2.multiply(target_crop, inv_alpha, scale=1.0 / 255.0)
+    frame[y1p:y2p, x1p:x2p] = cv2.add(a_enh, a_tgt)
 
     return frame
 

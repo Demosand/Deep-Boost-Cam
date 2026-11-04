@@ -29,3 +29,16 @@ switch_states.json
 install.bat
 /.claude
 *.bat
+
+# ── Deep-Boost-Cam: local data, never published ──
+/Faces/
+/_home/
+/_cache/
+/_temp/
+/trt_cache/
+/dfm_workspace/
+/face_library/
+/.claude/
+requirements-local.txt
+!Start-DeepBoostCam.bat
+!installer/*.bat

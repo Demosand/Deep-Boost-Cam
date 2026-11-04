@@ -1,3 +1,5 @@
-name = 'Deep-Live-Cam'
-version = '2.1.5'
-edition = 'GitHub Edition'
+name = 'Deep-Boost-Cam'
+version = '1.0.0'
+edition = '(based on Deep-Live-Cam 2.1.5)'
+# GitHub repository used by the startup update check.
+repo = 'Demosand/Deep-Boost-Cam'

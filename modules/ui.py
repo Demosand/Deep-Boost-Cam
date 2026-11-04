@@ -34,10 +34,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QListWidget,
+    QProgressBar,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -47,6 +50,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -76,6 +81,12 @@ from modules.utilities import (
 )
 from modules import imread_unicode
 from modules.video_capture import VideoCapturer
+from modules.face_tracker import FaceTracker
+from modules.processors.frame import realism, swapper_models
+from modules import virtual_camera
+from modules.live_pipeline import AsyncDetector, Reprojector, shift_faces
+from modules.live_output import LiveOutput
+from modules import face_fader, face_library
 
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
@@ -86,7 +97,7 @@ import json
 # ─── constants ────────────────────────────────────────────────────────────
 
 ROOT_HEIGHT = 820
-ROOT_WIDTH = 640
+ROOT_WIDTH = 720
 
 PREVIEW_MAX_HEIGHT = 700
 PREVIEW_MAX_WIDTH = 1200
@@ -211,6 +222,44 @@ QFrame#card {
     background-color: #262626;
     border-radius: 10px;
 }
+
+QTabWidget::pane { border: 1px solid #333; border-radius: 10px; top: -1px; background: #1e1e1e; }
+QTabBar::tab {
+    background: #262626; color: #b9b9b9;
+    padding: 8px 18px; margin-right: 4px;
+    border-top-left-radius: 8px; border-top-right-radius: 8px;
+}
+QTabBar::tab:selected { background: #2d6cdf; color: white; }
+QTabBar::tab:hover:!selected { background: #333; }
+
+QSpinBox {
+    background-color: #2a2a2a; border: 1px solid #404040;
+    border-radius: 6px; padding: 4px 8px; min-height: 22px;
+}
+QSpinBox:hover { border-color: #2d6cdf; }
+QWidget:disabled { color: #6a6a6a; }
+
+QLabel#hint { color: #8f8f8f; font-size: 9pt; }
+QWidget#settingsPage { background: #1e1e1e; }
+QScrollBar:vertical { background: #1e1e1e; width: 10px; margin: 0; }
+QScrollBar::handle:vertical { background: #444; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #555; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QLabel#valueLabel { color: #9ec5ff; font-weight: 600; min-width: 56px; }
+QLabel#banner {
+    background-color: #3a2f12; color: #ffd27a;
+    border: 1px solid #6b5520; border-radius: 8px; padding: 8px 10px;
+}
+QLabel#featureSummary { color: #9ec5ff; font-size: 9pt; }
+QProgressBar {
+    background-color: #2a2a2a; border: 1px solid #404040; border-radius: 6px;
+    text-align: center; color: #e6e6e6; min-height: 18px;
+}
+QProgressBar::chunk { background-color: #2d6cdf; border-radius: 5px; }
+QListWidget { background-color: #2a2a2a; border: 1px solid #404040; border-radius: 6px; }
+QPushButton#settings { background-color: #3a3a3a; }
+QPushButton#settings:hover { background-color: #4a4a4a; }
 """
 
 
@@ -312,6 +361,37 @@ def render_video_preview(
 
 # ─── persistence ─────────────────────────────────────────────────────────
 
+# Settings-dialog fields, persisted generically. Defaults are snapshotted at
+# import (before load_switch_states runs) for "Reset to defaults".
+_EXT_KEYS = (
+    "det_interval",
+    "tracking_v2", "tracking_optical_flow", "tracking_smoothing",
+    "tracking_smoothing_strength", "tracking_grace_frames", "tracking_max_motion",
+    "tracking_max_rotation", "tracking_min_confidence", "tracking_auto_redetect",
+    "freeze_on_face_lost",
+    "adaptive_face_mask", "adaptive_mask_feather",
+    "color_matching", "color_matching_strength",
+    "temporal_stabilization", "temporal_strength",
+    "eye_preservation", "eye_preservation_strength",
+    "mouth_preservation", "mouth_preservation_strength",
+    "dynamic_enhancement", "dynamic_enhancement_min_face", "dynamic_enhancement_max_motion",
+    "use_tensorrt", "trt_fp16", "trt_builder_optimization_level",
+    "trt_max_workspace_gb", "trt_timing_cache",
+    "swapper_model", "face_parts_mask", "face_parts", "face_parts_feather",
+    "occlusion_mask", "use_model_mask", "mask_interval", "capture_fps",
+    "virtual_camera", "virtual_camera_resolution",
+    "multi_source", "source_paths_extra", "async_detection", "reprojection",
+    "grain_matching", "grain_amount", "grain_sharpness_amount",
+    "face_fader", "fader_seconds", "profile_fade", "profile_yaw_start", "profile_yaw_end",
+    "profile_pitch_start", "profile_pitch_end",
+    "upscaler", "upscaler_mode", "upscaler_model", "frame_interpolation",
+    "check_updates",
+)
+_EXT_DEFAULTS = {
+    k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
+    for k, v in ((k, getattr(modules.globals, k)) for k in _EXT_KEYS)
+}
+
 
 def save_switch_states():
     state = {
@@ -332,6 +412,7 @@ def save_switch_states():
         "mouth_mask_size": modules.globals.mouth_mask_size,
         "capture_resolution": list(modules.globals.capture_resolution),
         "det_size": modules.globals.det_size,
+        **{k: getattr(modules.globals, k) for k in _EXT_KEYS},
     }
     try:
         with open("switch_states.json", "w") as f:
@@ -373,6 +454,37 @@ def load_switch_states():
                 pass
         if state.get("det_size") in (160, 320, 640):
             modules.globals.det_size = int(state["det_size"])
+        for k, default in _EXT_DEFAULTS.items():
+            v = state.get(k)
+            # Type-checked: a hand-edited file can't push a str into a slider.
+            if isinstance(default, bool):
+                if isinstance(v, bool):
+                    setattr(modules.globals, k, v)
+            elif isinstance(default, str):
+                if isinstance(v, str):
+                    setattr(modules.globals, k, v)
+            elif isinstance(default, dict):
+                if isinstance(v, dict):
+                    merged = dict(default)
+                    merged.update({kk: vv for kk, vv in v.items()
+                                   if kk in default and isinstance(vv, bool)})
+                    setattr(modules.globals, k, merged)
+            elif isinstance(default, list):
+                if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                    setattr(modules.globals, k, list(v))
+            elif isinstance(default, tuple):
+                if (isinstance(v, (list, tuple)) and len(v) == len(default)
+                        and all(isinstance(x, int) and x >= 0 for x in v)):
+                    setattr(modules.globals, k, tuple(v))
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                setattr(modules.globals, k, type(default)(v))
+        from modules.processors.frame import upscaler as _ups
+        if modules.globals.upscaler_model not in _ups.MODELS:
+            modules.globals.upscaler_model = "span"
+        if modules.globals.upscaler_mode not in ("frame", "face"):
+            modules.globals.upscaler_mode = "face"
+        if modules.globals.swapper_model not in swapper_models.BY_KEY:
+            modules.globals.swapper_model = swapper_models.DEFAULT_KEY
     except FileNotFoundError:
         pass
     except (OSError, json.JSONDecodeError):
@@ -386,6 +498,7 @@ class _UIBridge(QObject):
     """Single QObject that owns cross-thread signals."""
 
     statusChanged = Signal(str)
+    updateAvailable = Signal(dict)
 
 
 def _emit_status(text: str) -> None:
@@ -504,14 +617,23 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(ROOT_WIDTH, ROOT_HEIGHT)
         self.resize(ROOT_WIDTH, ROOT_HEIGHT)
 
+        # Scrollable root: the window stays usable on small/scaled screens.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setCentralWidget(scroll)
         root = QWidget()
-        self.setCentralWidget(root)
+        root.setObjectName("settingsPage")  # dark page background
+        scroll.setWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         # Source/Target row
         layout.addLayout(self._build_image_row())
+
+        layout.addLayout(self._build_face_row())
 
         # Options grid
         layout.addWidget(self._build_options_card())
@@ -521,6 +643,28 @@ class MainWindow(QMainWindow):
 
         # Action buttons
         layout.addLayout(self._build_action_row())
+
+        # Advanced settings entry point + what is currently on.
+        settings_row = QHBoxLayout()
+        self.btn_settings = QPushButton("⚙  " + _("Advanced settings"))
+        self.btn_settings.setObjectName("settings")
+        self.btn_settings.setToolTip(_(
+            "Face tracking, detection frequency, realism and TensorRT acceleration"
+        ))
+        self.btn_settings.clicked.connect(self._on_open_settings)
+        settings_row.addWidget(self.btn_settings)
+        self.btn_dfm = QPushButton("🧪  " + _("DFM Studio"))
+        self.btn_dfm.setObjectName("settings")
+        self.btn_dfm.setToolTip(_("Train your own .dfm face model on this GPU"))
+        self.btn_dfm.clicked.connect(self._on_open_dfm_studio)
+        settings_row.addWidget(self.btn_dfm)
+        layout.addLayout(settings_row)
+        self._feature_summary = QLabel("")
+        self._feature_summary.setObjectName("featureSummary")
+        self._feature_summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._feature_summary.setWordWrap(True)
+        layout.addWidget(self._feature_summary)
+        self.refresh_feature_summary()
 
         # Camera selection
         layout.addWidget(self._build_camera_card())
@@ -592,6 +736,96 @@ class MainWindow(QMainWindow):
         row.addLayout(tgt_col)
         return row
 
+    # ── face row: swap on/off + face library ─────────────────────────────
+
+    def _build_face_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self.btn_swap_toggle = QPushButton()
+        self.btn_swap_toggle.setCheckable(True)
+        self.btn_swap_toggle.setChecked(modules.globals.swap_enabled)
+        self.btn_swap_toggle.toggled.connect(self._on_swap_toggled)
+        self.btn_swap_toggle.setToolTip(_(
+            "Turn the face swap on/off without stopping Live. With Face Fader on, "
+            "the change is smooth."))
+        self._paint_swap_toggle()
+        row.addWidget(self.btn_swap_toggle)
+        row.addWidget(QLabel(_("Face library:")))
+        self.cb_library = QComboBox()
+        self.cb_library.setToolTip(_("Saved face sets: choose one to make it the source face"))
+        self.cb_library.activated.connect(self._on_library_pick)
+        row.addWidget(self.cb_library, 1)
+        b_save = QPushButton("💾")
+        b_save.setObjectName("secondary")
+        b_save.setFixedWidth(40)
+        b_save.setToolTip(_("Save the current source photo(s) to the library"))
+        b_save.clicked.connect(self._on_library_save)
+        row.addWidget(b_save)
+        b_del = QPushButton("🗑")
+        b_del.setObjectName("secondary")
+        b_del.setFixedWidth(40)
+        b_del.setToolTip(_("Delete the selected set from the library"))
+        b_del.clicked.connect(self._on_library_delete)
+        row.addWidget(b_del)
+        self.refresh_library()
+        return row
+
+    def _paint_swap_toggle(self) -> None:
+        on = modules.globals.swap_enabled
+        self.btn_swap_toggle.setText(_("Swap: ON") if on else _("Swap: OFF"))
+        self.btn_swap_toggle.setObjectName("" if on else "danger")
+        self.btn_swap_toggle.style().unpolish(self.btn_swap_toggle)
+        self.btn_swap_toggle.style().polish(self.btn_swap_toggle)
+
+    def _on_swap_toggled(self, value: bool) -> None:
+        modules.globals.swap_enabled = bool(value)
+        self._paint_swap_toggle()
+
+    def refresh_library(self) -> None:
+        self.cb_library.clear()
+        self.cb_library.addItem(_("(choose a saved face)"), "")
+        for name in face_library.list_sets():
+            self.cb_library.addItem(f"{name}  ({len(face_library.photos(name))})", name)
+
+    def _on_library_pick(self, idx: int) -> None:
+        name = self.cb_library.itemData(idx)
+        paths = face_library.photos(name) if name else []
+        if not paths:
+            return
+        from modules import source_identity
+        modules.globals.source_path = paths[0]
+        modules.globals.source_paths_extra = paths[1:]
+        modules.globals.multi_source = len(paths) > 1
+        source_identity.reset()
+        save_switch_states()
+        self.source_label.setPixmap(render_image_preview(paths[0], (200, 200)))
+        self.source_label.setText("")
+        update_status(_("Face from library:") + f" {name}")
+
+    def _on_library_save(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        paths = ([modules.globals.source_path] if modules.globals.source_path else []) + \
+            [p for p in modules.globals.source_paths_extra if p != modules.globals.source_path]
+        if not paths:
+            update_status(_("Select a source face first"))
+            return
+        name, ok = QInputDialog.getText(self, _("Face library"), _("Name for this face set:"))
+        if not ok or not face_library.safe_name(name):
+            return
+        try:
+            stored = face_library.save_set(name, paths)
+        except (OSError, ValueError) as error:
+            update_status(_("Could not save:") + f" {error}")
+            return
+        self.refresh_library()
+        self.cb_library.setCurrentIndex(max(0, self.cb_library.findData(stored)))
+        update_status(_("Saved to library:") + f" {stored} ({len(paths)})")
+
+    def _on_library_delete(self) -> None:
+        name = self.cb_library.currentData()
+        if name:
+            face_library.delete_set(name)
+            self.refresh_library()
+
     # ── options card ─────────────────────────────────────────────────────
 
     def _build_options_card(self) -> QGroupBox:
@@ -657,6 +891,20 @@ class MainWindow(QMainWindow):
         self.cb_enhancer.currentTextChanged.connect(self._on_enhancer_change)
         self.cb_enhancer.setToolTip(_("Select a face enhancement model (None = no enhancement)"))
         grid.addWidget(self.cb_enhancer, len(items) // 2, 1)
+
+        # Face swap model
+        grid.addWidget(QLabel(_("Swap model:")), len(items) // 2 + 1, 0)
+        self.cb_swapper = QComboBox()
+        for spec in swapper_models.SWAPPERS:
+            self.cb_swapper.addItem(spec.label, spec.key)
+        self.cb_swapper.setCurrentIndex(max(0, self.cb_swapper.findData(modules.globals.swapper_model)))
+        self.cb_swapper.currentIndexChanged.connect(self._on_swapper_change)
+        self.cb_swapper.setToolTip(_(
+            "Inswapper 128: original, fastest to load. ReSwapper 256: inswapper-compatible "
+            "256 px retrain. HyperSwap 1A/1B/1C 256: sharper 256 px models with their own "
+            "face mask. A new model downloads into models/ on first use (~400-550 MB)."
+        ))
+        grid.addWidget(self.cb_swapper, len(items) // 2 + 1, 1)
 
         return card
 
@@ -764,13 +1012,11 @@ class MainWindow(QMainWindow):
             ("960 x 540 (qHD)", (960, 540)),
             ("1280 x 720 (HD)", (1280, 720)),
             ("1920 x 1080 (FHD)", (1920, 1080)),
+            ("2560 x 1440 (QHD)", (2560, 1440)),
+            ("3840 x 2160 (4K)", (3840, 2160)),
         ]
-        for label, _wh in self._resolution_options:
-            self.cb_resolution.addItem(label)
-        cur = tuple(modules.globals.capture_resolution)
-        idx = next((i for i, (_, wh) in enumerate(self._resolution_options) if wh == cur), 0)
-        self.cb_resolution.setCurrentIndex(idx)
         self.cb_resolution.currentIndexChanged.connect(self._on_resolution_change)
+        self.refresh_resolution_combo()
         self.cb_resolution.setToolTip(_(
             "Requested webcam resolution. Camera may negotiate to its "
             "nearest supported size — actual size printed in console as "
@@ -804,14 +1050,79 @@ class MainWindow(QMainWindow):
         ))
         grid.addWidget(self.cb_det_size, 2, 1, 1, 2)
 
+        # Row 3: capture frame rate
+        grid.addWidget(QLabel(_("Camera FPS:")), 3, 0)
+        self.cb_fps = QComboBox()
+        self._fps_options = [15, 24, 30, 60]
+        for v in self._fps_options:
+            self.cb_fps.addItem(f"{v} fps")
+        fps_now = int(modules.globals.capture_fps)
+        self.cb_fps.setCurrentIndex(self._fps_options.index(fps_now) if fps_now in self._fps_options else 3)
+        self.cb_fps.currentIndexChanged.connect(self._on_fps_change)
+        self.cb_fps.setToolTip(_(
+            "Frame rate requested from the camera (applies on next Live start). "
+            "The camera may deliver less; the real value is printed in the console."
+        ))
+        grid.addWidget(self.cb_fps, 3, 1, 1, 2)
+
+        # Row 4: virtual camera
+        self.sw_vcam = _Switch(_("Virtual camera (OBS)"), modules.globals.virtual_camera, _(
+            "Send the processed picture to the 'OBS Virtual Camera' device, so OBS, "
+            "Discord, Zoom or a browser can use it as a webcam. Needs OBS Studio installed; "
+            "do not start OBS's own virtual camera at the same time."
+        ))
+        self.sw_vcam.setEnabled(virtual_camera.available())
+        self.sw_vcam.toggled.connect(self._on_vcam_toggled)
+        grid.addWidget(self.sw_vcam, 4, 0, 1, 3)
+
         grid.setColumnStretch(1, 1)
         return card
+
+    def refresh_resolution_combo(self) -> None:
+        """Presets plus a 'Custom' entry when the saved size is not a preset."""
+        self.cb_resolution.blockSignals(True)
+        self.cb_resolution.clear()
+        for label, _wh in self._resolution_options:
+            self.cb_resolution.addItem(label)
+        cur = tuple(modules.globals.capture_resolution)
+        idx = next((i for i, (_l, wh) in enumerate(self._resolution_options) if wh == cur), None)
+        if idx is None:
+            self.cb_resolution.addItem(_("Custom:") + f" {cur[0]} x {cur[1]}")
+            idx = len(self._resolution_options)
+        self.cb_resolution.setCurrentIndex(idx)
+        self.cb_resolution.blockSignals(False)
+
+    def _on_fps_change(self, idx: int) -> None:
+        if 0 <= idx < len(self._fps_options):
+            modules.globals.capture_fps = self._fps_options[idx]
+            save_switch_states()
+
+    def _on_vcam_toggled(self, value: bool) -> None:
+        modules.globals.virtual_camera = value
+        save_switch_states()
+        if not value:
+            virtual_camera.stop()
+        self.refresh_feature_summary()
+
+    def _on_swapper_change(self, idx: int) -> None:
+        key = self.cb_swapper.itemData(idx)
+        if not key or key == modules.globals.swapper_model:
+            return
+        modules.globals.swapper_model = key
+        save_switch_states()
+        from modules.processors.frame.face_swapper import reset_face_swapper
+        reset_face_swapper()
+        update_status(
+            _("Swap model selected (loads on next use, first time downloads/builds):")
+            + f" {swapper_models.spec_for(key).label}"
+        )
 
     def _on_resolution_change(self, idx: int) -> None:
         if 0 <= idx < len(self._resolution_options):
             _label, wh = self._resolution_options[idx]
             modules.globals.capture_resolution = wh
             save_switch_states()
+            self.refresh_resolution_combo()  # drops a stale "Custom" entry
             # Pre-translate the static template; append the dynamic size after
             # so the message still participates in localization (update_status
             # only translates whole-string keys).
@@ -830,6 +1141,105 @@ class MainWindow(QMainWindow):
                 _("Face detection size set (analyser re-inits on next call):")
                 + f" {v}x{v}"
             )
+
+    def refresh_feature_summary(self) -> None:
+        g = modules.globals
+        on = []
+        if g.det_interval:
+            on.append(_("Detect every") + f" {g.det_interval}")
+        if g.tracking_v2:
+            on.append(_("Tracking 2.0") + (" + Optical Flow" if g.tracking_optical_flow else ""))
+        if g.freeze_on_face_lost:
+            on.append(_("Freeze on loss"))
+        for flag, label in (
+            ("adaptive_face_mask", "Adaptive mask"), ("color_matching", "Color matching"),
+            ("temporal_stabilization", "Temporal stabilization"),
+            ("eye_preservation", "Eyes"), ("mouth_preservation", "Mouth"),
+            ("grain_matching", "Grain"),
+            ("dynamic_enhancement", "Dynamic enhancement"),
+        ):
+            if getattr(g, flag):
+                on.append(_(label))
+        if g.use_tensorrt:
+            on.append("TensorRT" + (" FP16" if g.trt_fp16 else ""))
+        if g.face_parts_mask:
+            on.append(_("Face parts"))
+        if g.occlusion_mask:
+            on.append(_("Occlusion"))
+        if g.use_model_mask:
+            on.append(_("Model mask"))
+        if g.virtual_camera:
+            on.append(_("Virtual camera"))
+        if g.face_fader:
+            on.append(_("Face Fader"))
+        if g.profile_fade:
+            on.append(_("Profile fade"))
+        if g.upscaler:
+            on.append(_("Upscaler") + (" " + _("(face)") if g.upscaler_mode == "face" else ""))
+        if g.frame_interpolation:
+            on.append(_("Frame interpolation"))
+        if g.multi_source and g.source_paths_extra:
+            on.append(_("Multi-photo source") + f" ({1 + len(g.source_paths_extra)})")
+        if g.async_detection:
+            on.append(_("Async detection"))
+        if g.reprojection:
+            on.append(_("Reprojection"))
+        self._feature_summary.setText(
+            (_("Active:") + " " + " · ".join(on)) if on
+            else _("Advanced features: all off (standard mode)")
+        )
+
+    def start_update_check(self) -> None:
+        if not modules.globals.check_updates or _BRIDGE is None:
+            return
+        from modules import update_check
+        _BRIDGE.updateAvailable.connect(self._on_update_available)
+        update_check.check_async(_BRIDGE.updateAvailable.emit)
+
+    def _on_update_available(self, release: dict) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle(_("Update available"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(_("A new version of Deep-Boost-Cam is available:") + f" {release['tag']}"
+                    + "\n" + _("Your version:") + f" {modules.metadata.version}")
+        notes = (release.get("notes") or "").strip()
+        if notes:
+            box.setDetailedText(notes[:4000])
+        b_install = box.addButton(_("Install"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(_("Later"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is b_install:
+            webbrowser.open(release.get("url") or "https://github.com/" + modules.metadata.repo)
+
+    def _on_open_dfm_studio(self) -> None:
+        from modules.ui_dfm_studio import DFMStudioDialog
+        if getattr(self, "_dfm_dialog", None) is None:
+            self._dfm_dialog = DFMStudioDialog(self)
+        self._dfm_dialog.show()
+        self._dfm_dialog.raise_()
+
+    def refresh_swapper_combo(self) -> None:
+        """Re-list swap models (new .dfm files appear in models/dfm)."""
+        swapper_models.refresh_dfm()
+        self.cb_swapper.blockSignals(True)
+        self.cb_swapper.clear()
+        for spec in swapper_models.SWAPPERS:
+            self.cb_swapper.addItem(spec.label, spec.key)
+        self.cb_swapper.setCurrentIndex(max(0, self.cb_swapper.findData(modules.globals.swapper_model)))
+        self.cb_swapper.blockSignals(False)
+
+    def _on_open_settings(self) -> None:
+        dlg = SettingsDialog(self)
+        dlg.exec()
+        self.sw_vcam.blockSignals(True)
+        self.sw_vcam.setChecked(modules.globals.virtual_camera)
+        self.sw_vcam.blockSignals(False)
+        self.cb_swapper.blockSignals(True)
+        self.cb_swapper.setCurrentIndex(max(0, self.cb_swapper.findData(modules.globals.swapper_model)))
+        self.cb_swapper.blockSignals(False)
+        self.refresh_resolution_combo()
+        self.refresh_feature_summary()
 
     # ── slot handlers ────────────────────────────────────────────────────
 
@@ -1050,11 +1460,17 @@ class MainWindow(QMainWindow):
             _LIVE_MAPPER.raise_()
             return
         if not modules.globals.map_faces:
-            if modules.globals.source_path is None:
+            if (modules.globals.source_path is None
+                    and swapper_models.needs_source(modules.globals.swapper_model)):
                 update_status("Please select a source image first")
                 return
             from modules.face_analyser import get_face_analyser
             from modules.processors.frame.face_swapper import get_face_swapper
+            if modules.globals.use_tensorrt:
+                update_status(
+                    "TensorRT: loading engines. The first run builds them "
+                    "(several minutes, window may not respond); later runs load from cache."
+                )
             get_face_analyser()
             get_face_swapper()
             _open_webcam_preview(camera_index)
@@ -1075,6 +1491,814 @@ def _update_tumbler(var: str, value: bool) -> None:
     # toggling enhancers takes effect immediately.
     if _WEBCAM_PREVIEW is not None and _WEBCAM_PREVIEW.isVisible():
         get_frame_processors_modules(modules.globals.frame_processors)
+
+
+# ─── advanced settings dialog ───────────────────────────────────────────
+
+
+def _hint(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("hint")
+    label.setWordWrap(True)
+    return label
+
+
+def _dir_size_mb(path: str) -> float:
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total / (1 << 20)
+
+
+# Measured on RTX 5060 Ti; filled in from the benchmark (see notes).
+UPSCALER_TIMINGS = (
+    "Measured in Live on RTX 5060 Ti, TensorRT FP16, 720p camera, in its own thread (does not s"
+    "low the swap down): Face only ~20 ms per large face (model itself 4 ms SPAN / Clear Realit"
+    "y, 5 ms ESRGAN compact, 24 ms ESRGAN x2); Whole frame ~19 ms SPAN / Clear Reality, ~28 ms "
+    "ESRGAN compact, ESRGAN x2 ~255 ms (not for Live)."
+)
+
+
+class _EngineBuilder(QThread):
+    progress = Signal(int, str)
+    finished_all = Signal(str)
+
+    def __init__(self, jobs):
+        super().__init__()
+        self._jobs = jobs
+
+    def run(self) -> None:
+        errors = []
+        for i, (label, fn) in enumerate(self._jobs):
+            self.progress.emit(i, _("Building") + f" {i + 1}/{len(self._jobs)}: {label} ...")
+            t0 = time.time()
+            try:
+                fn()
+                print(f"[trt-prebuild] {label}: {time.time() - t0:.0f}s", flush=True)
+            except Exception as error:
+                errors.append(f"{label}: {str(error)[:120]}")
+        self.progress.emit(len(self._jobs), "")
+        self.finished_all.emit(
+            _("Done.") + (" " + _("Errors:") + " " + "; ".join(errors) if errors else
+                          " " + _("Engines are cached in trt_cache.")))
+
+
+class SettingsDialog(QDialog):
+    """Tabbed advanced settings. Changes apply live and persist immediately;
+    TensorRT options apply on the next start (sessions are built at load)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(_("Advanced settings"))
+        self.resize(920, 800)
+        self._controls: dict = {}       # field -> (widget, setter)
+        self._deps: list = []           # (master field, [widgets])
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        tabs = QTabWidget()
+        # "&" is a Qt mnemonic marker in tab titles; escape it.
+        tabs.addTab(self._page(self._build_tracking), _("Detection & Tracking").replace("&", "&&"))
+        tabs.addTab(self._page(self._build_realism), _("Realism"))
+        tabs.addTab(self._page(self._build_masks), _("Model & masks").replace("&", "&&"))
+        tabs.addTab(self._page(self._build_faces), _("Faces"))
+        tabs.addTab(self._page(self._build_output), _("Camera & output").replace("&", "&&"))
+        tabs.addTab(self._page(self._build_accel), _("Acceleration"))
+        layout.addWidget(tabs, 1)
+
+        buttons = QHBoxLayout()
+        btn_reset = QPushButton(_("Reset to defaults"))
+        btn_reset.setObjectName("secondary")
+        btn_reset.setToolTip(_("Turn every advanced feature off and restore default values"))
+        btn_reset.clicked.connect(self._reset_defaults)
+        btn_close = QPushButton(_("Close"))
+        btn_close.clicked.connect(self.accept)
+        buttons.addWidget(btn_reset)
+        buttons.addStretch(1)
+        buttons.addWidget(btn_close)
+        layout.addLayout(buttons)
+        self._sync_deps()
+
+    # ── generic builders ────────────────────────────────────────────────
+    def _page(self, build) -> QScrollArea:
+        inner = QWidget()
+        inner.setObjectName("settingsPage")
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(10)
+        build(v)
+        v.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _set(self, field: str, value) -> None:
+        setattr(modules.globals, field, value)
+        save_switch_states()
+        if field == "virtual_camera" and not value:
+            virtual_camera.stop()
+        if field.startswith(("color_", "temporal_", "eye_", "mouth_", "adaptive_", "grain_")):
+            realism.reset_state()
+        if field == "multi_source":
+            from modules import source_identity
+            source_identity.reset()
+        self._sync_deps()
+
+    def _card(self, parent: QVBoxLayout, title: str, hint: str = "") -> QGridLayout:
+        card = QGroupBox(title)
+        grid = QGridLayout(card)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        if hint:
+            grid.addWidget(_hint(hint), 0, 0, 1, 3)
+        parent.addWidget(card)
+        return grid
+
+    def _check(self, grid: QGridLayout, field: str, label: str, tip: str) -> QCheckBox:
+        cb = QCheckBox(label)
+        cb.setChecked(bool(getattr(modules.globals, field)))
+        cb.setToolTip(tip)
+        cb.toggled.connect(lambda v, f=field: self._set(f, bool(v)))
+        row = grid.rowCount()
+        grid.addWidget(cb, row, 0, 1, 3)
+        if tip:
+            grid.addWidget(_hint(tip), row + 1, 0, 1, 3)
+        self._controls[field] = (cb, cb.setChecked)
+        return cb
+
+    def _slider(self, grid: QGridLayout, field: str, label: str, lo: float, hi: float,
+                denom: int, fmt: Callable[[float], str], tip: str) -> list:
+        row = grid.rowCount()
+        name = QLabel(label)
+        name.setToolTip(tip)
+        s = QSlider(Qt.Orientation.Horizontal)
+        s.setRange(int(round(lo * denom)), int(round(hi * denom)))
+        s.setValue(int(round(float(getattr(modules.globals, field)) * denom)))
+        s.setToolTip(tip)
+        val = QLabel(fmt(s.value() / denom))
+        val.setObjectName("valueLabel")
+        is_int = isinstance(_EXT_DEFAULTS[field], int)
+
+        def changed(iv, f=field):
+            v = iv / denom
+            val.setText(fmt(v))
+            self._set(f, int(round(v)) if is_int else float(v))
+
+        s.valueChanged.connect(changed)
+        grid.addWidget(name, row, 0)
+        grid.addWidget(s, row, 1)
+        grid.addWidget(val, row, 2)
+        if tip:
+            grid.addWidget(_hint(tip), row + 1, 0, 1, 3)
+        self._controls[field] = (s, lambda v, s=s: s.setValue(int(round(float(v) * denom))))
+        return [name, s, val]
+
+    def _spin(self, grid: QGridLayout, field: str, label: str, lo: int, hi: int,
+              suffix: str, tip: str, special: str = "") -> list:
+        row = grid.rowCount()
+        name = QLabel(label)
+        name.setToolTip(tip)
+        sp = QSpinBox()
+        sp.setRange(lo, hi)
+        if suffix:
+            sp.setSuffix(suffix)
+        if special:
+            sp.setSpecialValueText(special)
+        sp.setValue(int(getattr(modules.globals, field)))
+        sp.setToolTip(tip)
+        sp.valueChanged.connect(lambda v, f=field: self._set(f, int(v)))
+        grid.addWidget(name, row, 0)
+        grid.addWidget(sp, row, 1, 1, 2)
+        if tip:
+            grid.addWidget(_hint(tip), row + 1, 0, 1, 3)
+        self._controls[field] = (sp, lambda v, sp=sp: sp.setValue(int(v)))
+        return [name, sp]
+
+    def _depends(self, master: str, widgets: list) -> None:
+        self._deps.append((master, widgets))
+
+    def _sync_deps(self) -> None:
+        for master, widgets in self._deps:
+            on = bool(getattr(modules.globals, master))
+            for w in widgets:
+                w.setEnabled(on)
+
+    def _reset_defaults(self) -> None:
+        old_model = modules.globals.swapper_model
+        for field, default in _EXT_DEFAULTS.items():
+            value = dict(default) if isinstance(default, dict) else default
+            ctrl = self._controls.get(field)
+            if ctrl is not None:
+                ctrl[1](value)
+            setattr(modules.globals, field, value)
+        for region, cb in getattr(self, "_part_boxes", {}).items():
+            cb.setChecked(modules.globals.face_parts.get(region, True))
+        save_switch_states()
+        realism.reset_state()
+        virtual_camera.stop()
+        if modules.globals.swapper_model != old_model:
+            from modules.processors.frame.face_swapper import reset_face_swapper
+            reset_face_swapper()
+        self._sync_deps()
+        update_status("Advanced settings reset to defaults")
+
+    # ── tab: detection & tracking ───────────────────────────────────────
+    def _build_tracking(self, v: QVBoxLayout) -> None:
+        pct = lambda x: f"{x * 100:.0f}%"
+
+        g = self._card(v, _("Face detection"), _(
+            "How often the neural face detector runs in Live mode. Between detections "
+            "the last position is reused (or tracked, with Face Tracking 2.0)."
+        ))
+        self._spin(g, "det_interval", _("Detect every"), 0, 30, " " + _("frames"), _(
+            "1 = every frame: most accurate, highest GPU load. Higher = faster but the "
+            "mask reacts later. Auto = about every 40 ms of camera time "
+            "(1 frame at 30 fps, 2 at 60 fps)."
+        ), special=_("Auto"))
+
+        g = self._card(v, _("Face Tracking 2.0"), _(
+            "Keeps the mask glued to the face between detections and through short "
+            "detector misses. Off = standard tracking (hold the last detection)."
+        ))
+        self._check(g, "tracking_v2", _("Enable Face Tracking 2.0"), "")
+        dep = []
+        dep.append(self._check(g, "tracking_optical_flow", _("Optical Flow tracking"), _(
+            "Follow face feature points with optical flow so the mask moves every frame, "
+            "not only on detection frames. Off = hold the last detection."
+        )))
+        dep.append(self._check(g, "tracking_smoothing", _("Smoothing (One Euro filter)"), _(
+            "Removes coordinate jitter while still following fast moves."
+        )))
+        dep += self._slider(g, "tracking_smoothing_strength", _("Smoothing strength"),
+                            0.0, 1.0, 100, pct, _("Higher = calmer mask, slightly more lag."))
+        dep += self._spin(g, "tracking_grace_frames", _("Grace period"), 0, 30,
+                          " " + _("frames"), _(
+            "How many frames the mask is kept when the face is lost. Limited on "
+            "purpose: after this the mask is dropped so it cannot freeze on the wrong spot."
+        ))
+        dep += self._slider(g, "tracking_max_motion", _("Max motion per frame"),
+                            0.05, 0.6, 100, pct, _(
+            "Tracked steps larger than this (share of face size) are rejected as "
+            "errors and trigger re-detection."
+        ))
+        dep += self._slider(g, "tracking_max_rotation", _("Max head tilt per frame"),
+                            5, 45, 1, lambda x: f"{x:.0f}°", _(
+            "Pose guard: larger in-plane rotation per frame is treated as a tracking error."
+        ))
+        dep += self._slider(g, "tracking_min_confidence", _("Face confidence threshold"),
+                            0.3, 0.95, 100, lambda x: f"{x:.2f}", _(
+            "Detections below this score are treated as a lost face."
+        ))
+        dep.append(self._check(g, "tracking_auto_redetect", _("Auto re-detection"), _(
+            "When tracking fails, run the detector on the very next frame instead of "
+            "waiting for the detection interval."
+        )))
+        self._depends("tracking_v2", dep)
+
+        g = self._card(v, _("Pipeline and latency"), _(
+            "Two ways to make Live smoother. They can be combined."
+        ))
+        self._check(g, "async_detection", _("Parallel detection (pipeline)"), _(
+            "Face detection runs in its own thread while the previous frame is being "
+            "swapped; the result is carried to the current frame with optical flow. "
+            "Measured: +12% FPS on CUDA with a heavy pipeline; little gain with TensorRT "
+            "(the detector is already ~2 ms). Applies immediately."
+        ))
+        self._check(g, "reprojection", _("Low-latency reprojection"), _(
+            "The picture is shown at camera rate: the last finished swap is moved onto "
+            "the newest camera frame by a tracker, so a slow pipeline delays the "
+            "expression, not the position. Measured with HyperSwap+GPEN on CUDA: 15 -> 29 "
+            "shown FPS, face position lag 26 -> 8 px. Single face only. Applies on next Live start."
+        ))
+
+        g = self._card(v, _("When the face is lost"))
+        self._check(g, "freeze_on_face_lost", _("Freeze picture (never show the real face)"), _(
+            "If no face is swapped on a frame, the camera output freezes on the last "
+            "swapped frame (black before the first one) instead of showing your real face."
+        ))
+
+    # ── tab: realism ────────────────────────────────────────────────────
+    def _build_realism(self, v: QVBoxLayout) -> None:
+        pct = lambda x: f"{x * 100:.0f}%"
+        v.addWidget(_hint(_(
+            "Algorithm-level improvements of the swap itself. All are off by default; "
+            "each costs well under 1 ms per face (they work on the 128x128 aligned face). "
+            "Features marked * need face landmarks (one small extra model per detection)."
+        )))
+
+        g = self._card(v, _("Adaptive Face Mask") + " *",
+                       _("Blend mask follows the face contour: less visible borders."))
+        self._check(g, "adaptive_face_mask", _("Enable"), "")
+        self._depends("adaptive_face_mask", self._slider(
+            g, "adaptive_mask_feather", _("Edge softness"), 0.0, 1.0, 100, pct,
+            _("Higher = softer, wider transition into the real skin.")))
+
+        g = self._card(v, _("Color Matching"),
+                       _("Matches brightness and skin tone of the swap to your frame."))
+        self._check(g, "color_matching", _("Enable"), "")
+        self._depends("color_matching", self._slider(
+            g, "color_matching_strength", _("Strength"), 0.0, 1.0, 100, pct, ""))
+
+        g = self._card(v, _("Temporal Stabilization"), _(
+            "Smart smoothing between frames: less flicker. Backs off automatically "
+            "while you talk or move, so there is no ghosting."))
+        self._check(g, "temporal_stabilization", _("Enable"), "")
+        self._depends("temporal_stabilization", self._slider(
+            g, "temporal_strength", _("Strength"), 0.0, 0.9, 100, pct, ""))
+
+        g = self._card(v, _("Eye Preservation") + " *", _(
+            "Keeps part of your real eyelids and eyes: natural blinking and gaze. "
+            "Too high leaks your own eye shape."))
+        self._check(g, "eye_preservation", _("Enable"), "")
+        self._depends("eye_preservation", self._slider(
+            g, "eye_preservation_strength", _("Strength"), 0.0, 1.0, 100, pct, ""))
+
+        g = self._card(v, _("Mouth Preservation") + " *", _(
+            "Feathered mask of your real lips: more natural speech. Independent of the "
+            "Mouth Mask slider on the main window."))
+        self._check(g, "mouth_preservation", _("Enable"), "")
+        self._depends("mouth_preservation", self._slider(
+            g, "mouth_preservation_strength", _("Strength"), 0.0, 1.0, 100, pct, ""))
+
+        g = self._card(v, _("Grain & sharpness matching"), _(
+            "Swap models draw a clean, smooth face; next to a noisy webcam picture that "
+            "smoothness gives the swap away. Measures the camera's noise and detail on your "
+            "real face every frame and gives the swapped face the same: sharpens or softens "
+            "it and adds the missing sensor grain. ~2 ms for a typical face (8 ms if it fills a 720p frame)."))
+        self._check(g, "grain_matching", _("Enable"), "")
+        dep = self._slider(g, "grain_amount", _("Grain"), 0.0, 1.5, 100, pct,
+                           _("100% = same noise level as the camera; more = grainier."))
+        dep += self._slider(g, "grain_sharpness_amount", _("Sharpness matching"), 0.0, 1.0, 100, pct,
+                            _("How strongly detail is pulled to the camera's level."))
+        self._depends("grain_matching", dep)
+
+        g = self._card(v, _("Dynamic Enhancement"), _(
+            "Runs the selected Face Enhancer only when it helps: skipped for small faces "
+            "and during fast motion, so less GPU load. Needs a Face Enhancer selected."))
+        self._check(g, "dynamic_enhancement", _("Enable"), "")
+        dep = self._spin(g, "dynamic_enhancement_min_face", _("Min face height"),
+                         40, 600, " px", _("Smaller faces skip enhancement."))
+        dep += self._slider(g, "dynamic_enhancement_max_motion", _("Skip above motion"),
+                            0.01, 0.3, 100, pct, _(
+            "Per-frame motion (share of face size) above which enhancement is skipped. "
+            "Motion is measured by Face Tracking 2.0."))
+        self._depends("dynamic_enhancement", dep)
+
+    # ── tab: model & masks ──────────────────────────────────────────────
+    def _build_masks(self, v: QVBoxLayout) -> None:
+        spec = swapper_models.spec_for(modules.globals.swapper_model)
+        v.addWidget(_hint(
+            _("Swap model is chosen on the main window (Options card). Current:") + f" {spec.label}"
+        ))
+
+        g = self._card(v, _("Several source photos"), _(
+            "Add more photos of the same person (front, turned, up, down). Their identities "
+            "are blended, weighted by your current head pose: the face stays steadier and "
+            "turned heads use the matching photo. The main photo is always included. "
+            "Not used by DFM models (their identity is built in)."
+        ))
+        self._check(g, "multi_source", _("Use several source photos"), "")
+        self._src_list = QListWidget()
+        self._src_list.setMaximumHeight(110)
+        self._src_list.addItems(modules.globals.source_paths_extra)
+        g.addWidget(self._src_list, g.rowCount(), 0, 1, 3)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        b_add = QPushButton(_("Add photos"))
+        b_add.setObjectName("secondary")
+        b_add.clicked.connect(self._add_source_photos)
+        b_del = QPushButton(_("Remove selected"))
+        b_del.setObjectName("secondary")
+        b_del.clicked.connect(self._remove_source_photo)
+        b_clr = QPushButton(_("Clear"))
+        b_clr.setObjectName("danger")
+        b_clr.clicked.connect(self._clear_source_photos)
+        for b in (b_add, b_del, b_clr):
+            row.addWidget(b)
+        row.addStretch(1)
+        holder = QWidget()
+        holder.setLayout(row)
+        g.addWidget(holder, g.rowCount(), 0, 1, 3)
+        self._depends("multi_source", [self._src_list, holder])
+
+        g = self._card(v, _("Model face mask"), _(
+            "HyperSwap models output their own face mask. Using it trims the swap to "
+            "the face the model actually generated. No effect on Inswapper/ReSwapper."
+        ))
+        self._check(g, "use_model_mask", _("Use the model's own mask"), "")
+
+        g = self._card(v, _("Face parts"), _(
+            "Choose which parts of the face are swapped; unchecked parts keep your real "
+            "face. Uses a face parser (BiSeNet, ~94 MB, downloads once). Hair, ears and "
+            "background are never painted, so a fringe over the forehead stays real."
+        ))
+        self._check(g, "face_parts_mask", _("Enable face part masks"), "")
+        names = {
+            "forehead": _("Forehead"), "brows": _("Eyebrows"), "eyes": _("Eyes"),
+            "nose": _("Nose"), "cheeks": _("Cheeks"), "mouth": _("Mouth / lips"),
+            "chin": _("Chin"),
+        }
+        holder = QWidget()
+        grid_parts = QGridLayout(holder)
+        grid_parts.setContentsMargins(0, 0, 0, 0)
+        self._part_boxes = {}
+        for i, region in enumerate(names):
+            cb = QCheckBox(names[region])
+            cb.setChecked(modules.globals.face_parts.get(region, True))
+            cb.toggled.connect(lambda val, r=region: self._set_part(r, val))
+            grid_parts.addWidget(cb, i // 2, i % 2)
+            self._part_boxes[region] = cb
+        g.addWidget(holder, g.rowCount(), 0, 1, 3)
+        dep = [holder]
+        dep += self._slider(g, "face_parts_feather", _("Edge softness"), 0.0, 1.0, 100,
+                            lambda x: f"{x * 100:.0f}%", _("Softer borders between swapped and real parts."))
+        self._depends("face_parts_mask", dep)
+
+        g = self._card(v, _("Occlusion"), _(
+            "Keeps hands, a microphone, a cup or glasses held in front of the face real "
+            "instead of painting the swap over them. Uses XSeg (~70 MB, downloads once)."
+        ))
+        self._check(g, "occlusion_mask", _("Enable occlusion mask"), "")
+
+        g = self._card(v, _("Mask performance"))
+        self._spin(g, "mask_interval", _("Update masks every"), 1, 10, " " + _("frames"), _(
+            "1 = every frame (hands are followed instantly). 2-3 roughly halves the cost "
+            "of the face-part and occlusion masks; the face stays aligned in the crop, so "
+            "a mask a frame old still fits. Single-face mode only."
+        ))
+
+    def _store_source_photos(self) -> None:
+        from modules import source_identity
+        modules.globals.source_paths_extra = [
+            self._src_list.item(i).text() for i in range(self._src_list.count())]
+        save_switch_states()
+        source_identity.reset()
+
+    def _add_source_photos(self) -> None:
+        paths, _f = QFileDialog.getOpenFileNames(self, _("Add photos"), _RECENT_SOURCE_DIR or "",
+                                                 _IMAGE_FILE_FILTER)
+        have = set(modules.globals.source_paths_extra)
+        for p in paths:
+            if p not in have:
+                self._src_list.addItem(p)
+        self._store_source_photos()
+
+    def _remove_source_photo(self) -> None:
+        for item in self._src_list.selectedItems():
+            self._src_list.takeItem(self._src_list.row(item))
+        self._store_source_photos()
+
+    def _clear_source_photos(self) -> None:
+        self._src_list.clear()
+        self._store_source_photos()
+
+    def _set_part(self, region: str, value: bool) -> None:
+        parts = dict(modules.globals.face_parts)
+        parts[region] = bool(value)
+        modules.globals.face_parts = parts
+        save_switch_states()
+
+    # ── tab: faces ──────────────────────────────────────────────────────
+    def _build_faces(self, v: QVBoxLayout) -> None:
+        g = self._card(v, _("Face Fader"), _(
+            "Smooth transitions: the 'Swap: ON/OFF' button fades the swap in and out, and "
+            "choosing another face (photo or library set) morphs into it instead of jumping. "
+            "DFM models fade in/out only (their face is built in)."))
+        self._check(g, "face_fader", _("Enable Face Fader"), "")
+        self._depends("face_fader", self._slider(
+            g, "fader_seconds", _("Transition time"), 0.2, 5.0, 10, lambda x: f"{x:.1f} s", ""))
+
+        g = self._card(v, _("Profile fade"), _(
+            "Swap models break down when the head turns far: a smeared half-face appears. "
+            "The real head angle (3D landmark model, ~4 ms on CUDA, faster with TensorRT) "
+            "smoothly lowers the swap between the start and end angles."))
+        self._check(g, "profile_fade", _("Enable profile fade"), "")
+        deg = lambda x: f"{x:.0f}°"
+        dep = self._slider(g, "profile_yaw_start", _("Turn: start fading"), 10, 80, 1, deg, "")
+        dep += self._slider(g, "profile_yaw_end", _("Turn: fully off"), 20, 90, 1, deg, "")
+        dep += self._slider(g, "profile_pitch_start", _("Up/down: start fading"), 10, 70, 1, deg, "")
+        dep += self._slider(g, "profile_pitch_end", _("Up/down: fully off"), 20, 90, 1, deg, "")
+        self._depends("profile_fade", dep)
+
+        g = self._card(v, _("Face library"), _(
+            "Saved face sets live in face_library/ inside the program folder. Save and pick "
+            "them on the main window (row under the photos); here you can rename or delete."))
+        self._lib_list = QListWidget()
+        self._lib_list.setMaximumHeight(130)
+        self._lib_list.addItems(face_library.list_sets())
+        g.addWidget(self._lib_list, g.rowCount(), 0, 1, 3)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        b_ren = QPushButton(_("Rename"))
+        b_ren.setObjectName("secondary")
+        b_ren.clicked.connect(self._lib_rename)
+        b_del = QPushButton(_("Delete"))
+        b_del.setObjectName("danger")
+        b_del.clicked.connect(self._lib_delete)
+        b_open = QPushButton(_("Open folder"))
+        b_open.setObjectName("secondary")
+        b_open.clicked.connect(lambda: (os.makedirs(face_library.LIB_DIR, exist_ok=True),
+                                        os.startfile(face_library.LIB_DIR)))
+        for b in (b_ren, b_del, b_open):
+            row.addWidget(b)
+        row.addStretch(1)
+        holder = QWidget()
+        holder.setLayout(row)
+        g.addWidget(holder, g.rowCount(), 0, 1, 3)
+
+    def _lib_changed(self) -> None:
+        self._lib_list.clear()
+        self._lib_list.addItems(face_library.list_sets())
+        parent = self.parent()
+        if hasattr(parent, "refresh_library"):
+            parent.refresh_library()
+
+    def _lib_rename(self) -> None:
+        item = self._lib_list.currentItem()
+        if item is None:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, _("Rename"), _("New name:"), text=item.text())
+        name = face_library.safe_name(name) if ok else ""
+        if name and name != item.text() and name not in face_library.list_sets():
+            os.replace(os.path.join(face_library.LIB_DIR, item.text()),
+                       os.path.join(face_library.LIB_DIR, name))
+            self._lib_changed()
+
+    def _lib_delete(self) -> None:
+        item = self._lib_list.currentItem()
+        if item is not None:
+            face_library.delete_set(item.text())
+            self._lib_changed()
+
+    # ── tab: camera & output ────────────────────────────────────────────
+    def _build_output(self, v: QVBoxLayout) -> None:
+        from modules.processors.frame import upscaler
+        g = self._card(v, _("Upscaler (x2)"), _(
+            "Doubles the output resolution with an AI super-resolution model (TensorRT when "
+            "enabled). 'Face only' upscales just the face region (cheap); 'Whole frame' "
+            "upscales everything (costly at 720p and above). Applies to the preview and the "
+            "virtual camera."))
+        self._check(g, "upscaler", _("Enable upscaler"), "")
+        dep = []
+        for field, label, items in (
+            ("upscaler_mode", _("Mode"), [("face", _("Face only")), ("frame", _("Whole frame"))]),
+            ("upscaler_model", _("Model"), [(k, _(m.label)) for k, m in upscaler.MODELS.items()]),
+        ):
+            row = g.rowCount()
+            lbl = QLabel(label)
+            combo = QComboBox()
+            for key, text in items:
+                combo.addItem(text, key)
+            combo.setCurrentIndex(max(0, combo.findData(getattr(modules.globals, field))))
+            combo.currentIndexChanged.connect(
+                lambda i, f=field, c=combo: self._set(f, c.itemData(i)))
+            g.addWidget(lbl, row, 0)
+            g.addWidget(combo, row, 1, 1, 2)
+            self._controls[field] = (combo, lambda val, c=combo: c.setCurrentIndex(max(0, c.findData(val))))
+            dep += [lbl, combo]
+        g.addWidget(_hint(_(UPSCALER_TIMINGS)), g.rowCount(), 0, 1, 3)
+        self._depends("upscaler", dep)
+
+        g = self._card(v, _("Frame interpolation"), _(
+            "Doubles the Live frame rate (e.g. 30 -> 60 fps) with the RIFE model: an in-between "
+            "frame is generated between every two frames. Adds about half a frame of latency. "
+            "Measured at 720p with HyperSwap + TensorRT: ~50 fps out of 30. Together with the "
+            "upscaler the budget runs out (~30 fps out) - use one of the two. Applies immediately."))
+        self._check(g, "frame_interpolation", _("Enable frame interpolation"), "")
+
+        g = self._card(v, _("Custom camera resolution"), _(
+            "Any size your camera supports (presets are on the main window). "
+            "Applies on next Live start; the camera may pick the nearest supported size."
+        ))
+        w_now, h_now = modules.globals.capture_resolution
+        row = g.rowCount()
+        self._res_w, self._res_h = QSpinBox(), QSpinBox()
+        for sp, val in ((self._res_w, w_now), (self._res_h, h_now)):
+            sp.setRange(160, 7680)
+            sp.setSingleStep(16)
+            sp.setValue(int(val))
+        btn = QPushButton(_("Apply"))
+        btn.clicked.connect(self._apply_custom_resolution)
+        g.addWidget(self._res_w, row, 0)
+        g.addWidget(self._res_h, row, 1)
+        g.addWidget(btn, row, 2)
+
+        g = self._card(v, _("Virtual camera (OBS)"), _(
+            "Sends the processed picture (without FPS text) to the 'OBS Virtual Camera' "
+            "device. In OBS add a Video Capture Device source, or pick the camera in "
+            "Discord / Zoom / a browser. Do not start OBS's own virtual camera at the same time."
+        ))
+        cb = self._check(g, "virtual_camera", _("Enable virtual camera output"), "")
+        cb.setEnabled(virtual_camera.available())
+        row = g.rowCount()
+        lbl = QLabel(_("Output resolution"))
+        combo = QComboBox()
+        self._vcam_sizes = [(0, 0), (640, 480), (1280, 720), (1920, 1080), (2560, 1440)]
+        for wh in self._vcam_sizes:
+            combo.addItem(_("Same as camera") if wh == (0, 0) else f"{wh[0]} x {wh[1]}")
+        cur = tuple(modules.globals.virtual_camera_resolution)
+        combo.setCurrentIndex(self._vcam_sizes.index(cur) if cur in self._vcam_sizes else 0)
+        combo.currentIndexChanged.connect(
+            lambda i: self._set("virtual_camera_resolution", self._vcam_sizes[i]))
+        g.addWidget(lbl, row, 0)
+        g.addWidget(combo, row, 1, 1, 2)
+        self._controls["virtual_camera_resolution"] = (
+            combo, lambda val: combo.setCurrentIndex(
+                self._vcam_sizes.index(tuple(val)) if tuple(val) in self._vcam_sizes else 0))
+
+    def _apply_custom_resolution(self) -> None:
+        wh = (int(self._res_w.value()), int(self._res_h.value()))
+        modules.globals.capture_resolution = wh
+        save_switch_states()
+        parent = self.parent()
+        if hasattr(parent, "refresh_resolution_combo"):
+            parent.refresh_resolution_combo()
+        update_status(_("Capture resolution set (applies on next Live start):") + f" {wh[0]}x{wh[1]}")
+
+    # ── tab: acceleration ───────────────────────────────────────────────
+    def _build_accel(self, v: QVBoxLayout) -> None:
+        from importlib import metadata
+        import onnxruntime
+        from modules.processors.frame._onnx_enhancer import tensorrt_available
+
+        banner = QLabel(_(
+            "Experimental. TensorRT options apply after restarting the program. "
+            "The first start builds engines for each model (several minutes, the window "
+            "may not respond); later starts load them from the cache in seconds."
+        ))
+        banner.setObjectName("banner")
+        banner.setWordWrap(True)
+        v.addWidget(banner)
+
+        avail = tensorrt_available()
+        try:
+            trt_ver = metadata.version("tensorrt-cu12-libs")
+        except metadata.PackageNotFoundError:
+            trt_ver = "-"
+        status = (
+            f"ONNX Runtime {onnxruntime.__version__} · TensorRT {trt_ver} · "
+            + (_("available") if avail else _("NOT available: install tensorrt-cu12-libs 10.x"))
+        )
+        g = self._card(v, _("TensorRT"), status)
+        cb = self._check(g, "use_tensorrt", _("Use TensorRT (experimental)"), _(
+            "Runs detection, swap and enhancer models through TensorRT. Measured on "
+            "RTX 5060 Ti: detection 6.2 to 1.95 ms, swap 15.1 to 6.8 ms, GPEN-256 10 to 4.8 ms, "
+            "GFPGAN 75 to 50 ms. Requires the CUDA execution provider (--execution-provider cuda)."
+        ))
+        cb.setEnabled(avail)
+        dep = [self._check(g, "trt_fp16", _("FP16 precision"), _(
+            "Half precision on Tensor Cores for face detection, recognition and landmarks "
+            "(about 3x faster). Swap and enhancer models always run in their own precision: "
+            "forcing FP16 there was measured to corrupt the image."
+        ))]
+        row = g.rowCount()
+        lvl_label = QLabel(_("Builder optimization level"))
+        lvl = QComboBox()
+        lvl.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        lvl.setMinimumContentsLength(12)
+        for text in ("0", "1", "2", "3 - " + _("default, recommended"), "4",
+                     "5 - " + _("slowest build, max search")):
+            lvl.addItem(text)
+        lvl.setCurrentIndex(int(modules.globals.trt_builder_optimization_level))
+        lvl.currentIndexChanged.connect(
+            lambda i: self._set("trt_builder_optimization_level", int(i)))
+        lvl.setToolTip(_(
+            "Higher levels search more kernels: longer first build, sometimes faster engines."))
+        g.addWidget(lvl_label, row, 0)
+        g.addWidget(lvl, row, 1, 1, 2)
+        self._controls["trt_builder_optimization_level"] = (
+            lvl, lambda val: lvl.setCurrentIndex(int(val)))
+        dep += [lvl_label, lvl]
+        dep += self._spin(g, "trt_max_workspace_gb", _("Builder workspace"), 1, 12, " GB", _(
+            "Scratch VRAM TensorRT may use while building. 4 GB fits a 16 GB card "
+            "alongside the camera pipeline."
+        ))
+        dep.append(self._check(g, "trt_timing_cache", _("Timing cache"), _(
+            "Reuses kernel timings between models and rebuilds: much faster engine builds."
+        )))
+        self._depends("use_tensorrt", dep)
+
+        g = self._card(v, _("Build engines now"), _(
+            "Builds the TensorRT engines in the background, so Live starts without the "
+            "multi-minute pause. Each model takes ~0.5-4 min once; later starts load them "
+            "in seconds. Close Live first. Needs 'Use TensorRT' on."
+        ))
+        from modules import trt_prebuild
+        self._build_boxes = []
+        holder = QWidget()
+        lay = QGridLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        for i, (key, label, fn, default) in enumerate(trt_prebuild.targets()):
+            cb = QCheckBox(_(label) if not label.startswith("Swap model:")
+                           else _("Swap model:") + label[len("Swap model:"):])
+            cb.setChecked(default)
+            lay.addWidget(cb, i // 2, i % 2)
+            self._build_boxes.append((cb, label, fn))
+        g.addWidget(holder, g.rowCount(), 0, 1, 3)
+        self._btn_build = QPushButton(_("Build selected engines"))
+        self._btn_build.clicked.connect(self._start_build)
+        g.addWidget(self._btn_build, g.rowCount(), 0)
+        self._build_bar = QProgressBar()
+        self._build_bar.setValue(0)
+        g.addWidget(self._build_bar, g.rowCount() - 1, 1, 1, 2)
+        self._build_log = _hint("")
+        g.addWidget(self._build_log, g.rowCount(), 0, 1, 3)
+        self._depends("use_tensorrt", [holder, self._btn_build])
+
+        g = self._card(v, _("Updates"), _(
+            "At start the program asks GitHub whether a newer Deep-Boost-Cam release exists "
+            "and offers to open its page. Nothing is downloaded or installed automatically."))
+        self._check(g, "check_updates", _("Check for updates at start"), "")
+
+        g = self._card(v, _("Engine cache"))
+        path = _hint(modules.globals.trt_cache_dir)
+        # A path has no spaces to wrap at; let it be clipped instead of
+        # widening the whole page.
+        path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        g.addWidget(path, g.rowCount(), 0, 1, 3)
+        self._cache_label = QLabel("")
+        g.addWidget(self._cache_label, g.rowCount(), 0, 1, 3)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        btn_open = QPushButton(_("Open folder"))
+        btn_open.setObjectName("secondary")
+        btn_open.clicked.connect(self._open_cache)
+        btn_clear = QPushButton(_("Clear engine cache"))
+        btn_clear.setObjectName("danger")
+        btn_clear.setToolTip(_("Deletes built engines; they are rebuilt on the next start."))
+        btn_clear.clicked.connect(self._clear_cache)
+        row.addWidget(btn_open)
+        row.addWidget(btn_clear)
+        row.addStretch(1)
+        holder = QWidget()
+        holder.setLayout(row)
+        g.addWidget(holder, g.rowCount(), 0, 1, 3)
+        self._refresh_cache_label()
+
+    def _start_build(self) -> None:
+        if _WEBCAM_PREVIEW is not None and _WEBCAM_PREVIEW.isVisible():
+            self._build_log.setText(_("Close the Live window first."))
+            return
+        jobs = [(label, fn) for cb, label, fn in self._build_boxes if cb.isChecked()]
+        if not jobs:
+            return
+        self._btn_build.setEnabled(False)
+        self._build_bar.setRange(0, len(jobs))
+        self._build_bar.setValue(0)
+        self._builder = _EngineBuilder(jobs)
+        self._builder.progress.connect(self._on_build_progress)
+        self._builder.finished_all.connect(self._on_build_done)
+        self._builder.start()
+
+    def _on_build_progress(self, done: int, text: str) -> None:
+        self._build_bar.setValue(done)
+        self._build_log.setText(text)
+
+    def _on_build_done(self, text: str) -> None:
+        self._build_log.setText(text)
+        self._btn_build.setEnabled(True)
+        self._refresh_cache_label()
+
+    def done(self, result) -> None:  # keep the dialog until a build finishes
+        builder = getattr(self, "_builder", None)
+        if builder is not None and builder.isRunning():
+            self._build_log.setText(_("Engines are still building; wait for it to finish."))
+            return
+        super().done(result)
+
+    def _refresh_cache_label(self) -> None:
+        cache = modules.globals.trt_cache_dir
+        size = _dir_size_mb(cache) if os.path.isdir(cache) else 0.0
+        self._cache_label.setText(_("Cache size:") + f" {size:.0f} MB")
+
+    def _open_cache(self) -> None:
+        os.makedirs(modules.globals.trt_cache_dir, exist_ok=True)
+        if platform.system() == "Windows":
+            os.startfile(modules.globals.trt_cache_dir)
+
+    def _clear_cache(self) -> None:
+        cache = modules.globals.trt_cache_dir
+        if not os.path.isdir(cache):
+            return
+        # Only TensorRT artefacts, never anything else that may live there.
+        for name in os.listdir(cache):
+            if name.endswith((".engine", ".profile", ".timing")):
+                try:
+                    os.remove(os.path.join(cache, name))
+                except OSError:
+                    pass
+        self._refresh_cache_label()
+        update_status("TensorRT engine cache cleared")
 
 
 # ─── preview window (still-image / video scrub) ──────────────────────────
@@ -1140,40 +2364,53 @@ class PreviewWindow(QWidget):
 class _CaptureWorker(QThread):
     """Reads frames from the camera into a bounded queue. Drops on overflow."""
 
-    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event):
+    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event,
+                 raw_queue: Optional[queue.Queue] = None):
         super().__init__()
         self._cap = cap
         self._queue = capture_queue
+        self._raw_queue = raw_queue
         self._stop = stop_event
 
     def run(self) -> None:
+        seq = 0
         while not self._stop.is_set():
             ret, frame = self._cap.read()
             if not ret:
                 self._stop.set()
                 break
-            try:
-                self._queue.put_nowait(frame)
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    self._queue.put_nowait(frame)
-                except queue.Full:
-                    pass
+            seq += 1
+            for q in (self._queue, self._raw_queue):
+                if q is not None:
+                    _put_latest(q, (seq, frame))
+
+
+def _put_latest(q: queue.Queue, item) -> None:
+    """Non-blocking put that drops the oldest item when the queue is full."""
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(item)
+        except queue.Full:
+            pass
 
 
 class _ProcessingWorker(QThread):
     """Pulls raw frames, runs detect/swap/enhance, pushes processed frames."""
 
-    def __init__(self, capture_queue, processed_queue, stop_event, camera_fps: float):
+    def __init__(self, capture_queue, processed_queue, stop_event, camera_fps: float,
+                 reprojector: Optional[Reprojector] = None):
         super().__init__()
         self._cq = capture_queue
         self._pq = processed_queue
         self._stop = stop_event
         self._fps = camera_fps
+        self._reproj = reprojector
 
     def run(self) -> None:
         frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
@@ -1187,17 +2424,34 @@ class _ProcessingWorker(QThread):
         det_count = 0
         cached_target_face = None
         cached_many_faces = None
-        det_interval = max(1, round(self._fps * 0.08))
+        auto_det_interval = max(1, round(self._fps * 0.04))
+        tracker = FaceTracker()
+        realism.reset_state()
+        face_fader.reset()
+        last_output = None
+        detector: Optional[AsyncDetector] = None
+        output = LiveOutput(self._pq, self._fps, update_status)
 
         while not self._stop.is_set():
             try:
-                frame = self._cq.get(timeout=0.05)
+                item = self._cq.get(timeout=0.05)
             except queue.Empty:
                 continue
+            seq, frame = item if isinstance(item, tuple) else (0, item)
+
+            # Async detection is toggled live from Settings.
+            if modules.globals.async_detection and detector is None:
+                detector = AsyncDetector(lambda f: detect_one_face_fast(f),
+                                         lambda f: detect_many_faces_fast(f))
+            elif not modules.globals.async_detection and detector is not None:
+                detector.stop()
+                detector = None
 
             temp_frame = frame
             if modules.globals.live_mirror:
                 temp_frame = gpu_flip(temp_frame, 1)
+            # Reprojection needs the pre-swap pixels (paste-back is in place).
+            raw_frame = temp_frame.copy() if self._reproj is not None else None
 
             if not modules.globals.map_faces:
                 if (
@@ -1226,14 +2480,47 @@ class _ProcessingWorker(QThread):
                         reported_source_error = None
                         source_image = get_one_face(source_frame)
 
+                # Read per frame so Settings changes apply live.
+                det_interval = modules.globals.det_interval or auto_det_interval
+                need_landmarks = modules.globals.mouth_mask or realism.needs_landmarks()
+                use_tracker = modules.globals.tracking_v2 and not modules.globals.many_faces
                 det_count += 1
-                if det_count % det_interval == 0:
-                    if modules.globals.many_faces:
-                        cached_target_face = None
-                        cached_many_faces = detect_many_faces_fast(temp_frame)
-                    else:
-                        cached_target_face = detect_one_face_fast(temp_frame)
+                run_det = det_count % det_interval == 0 or (use_tracker and tracker.need_detect)
+                if detector is not None:
+                    # Pipeline: hand this frame to the detector thread, use the
+                    # newest finished detection carried to this frame by flow.
+                    many = bool(modules.globals.many_faces)
+                    if run_det:
+                        detector.submit(seq, temp_frame, many)
+                    res = detector.take()
+                    ready = res is not None and res[3] == many
+                    found = shift_faces(res[2], res[1], temp_frame) if ready and res[2] else None
+                    if use_tracker:
+                        cached_target_face = tracker.update(
+                            temp_frame, ready, found, want_landmarks=need_landmarks
+                        )
                         cached_many_faces = None
+                    elif ready:
+                        if tracker.face is not None:
+                            tracker.reset()
+                        cached_many_faces = found if many else None
+                        cached_target_face = None if many else found
+                elif use_tracker:
+                    detected = detect_one_face_fast(temp_frame) if run_det else None
+                    cached_target_face = tracker.update(
+                        temp_frame, run_det, detected, want_landmarks=need_landmarks
+                    )
+                    cached_many_faces = None
+                else:
+                    if tracker.face is not None:
+                        tracker.reset()
+                    if run_det:
+                        if modules.globals.many_faces:
+                            cached_target_face = None
+                            cached_many_faces = detect_many_faces_fast(temp_frame)
+                        else:
+                            cached_target_face = detect_one_face_fast(temp_frame)
+                            cached_many_faces = None
 
                 cached_faces = None
                 if cached_many_faces:
@@ -1244,22 +2531,31 @@ class _ProcessingWorker(QThread):
                 # Fast detection skips the 2d106 landmark model, but the mouth
                 # mask needs it. Attach landmarks on demand (computed once per
                 # detection cycle — the helper no-ops if already present).
-                if modules.globals.mouth_mask and cached_faces:
+                if need_landmarks and cached_faces:
                     ensure_landmarks(temp_frame, cached_faces)
+
+                # Dynamic enhancement: skip the (expensive) enhancer when the
+                # face is too small to show detail or moving fast (motion blur).
+                enhance_ok = True
+                if modules.globals.dynamic_enhancement:
+                    sizes = [float(f.bbox[3] - f.bbox[1]) for f in (cached_faces or [])]
+                    enhance_ok = bool(sizes) and max(sizes) >= modules.globals.dynamic_enhancement_min_face
+                    if use_tracker and tracker.motion > modules.globals.dynamic_enhancement_max_motion:
+                        enhance_ok = False
 
                 for fp in frame_processors:
                     if fp.NAME == "DLC.FACE-ENHANCER":
-                        if modules.globals.fp_ui["face_enhancer"]:
+                        if modules.globals.fp_ui["face_enhancer"] and enhance_ok:
                             temp_frame = fp.process_frame(
                                 None, temp_frame, detected_faces=cached_faces
                             )
                     elif fp.NAME == "DLC.FACE-ENHANCER-GPEN256":
-                        if modules.globals.fp_ui.get("face_enhancer_gpen256", False):
+                        if modules.globals.fp_ui.get("face_enhancer_gpen256", False) and enhance_ok:
                             temp_frame = fp.process_frame(
                                 None, temp_frame, detected_faces=cached_faces
                             )
                     elif fp.NAME == "DLC.FACE-ENHANCER-GPEN512":
-                        if modules.globals.fp_ui.get("face_enhancer_gpen512", False):
+                        if modules.globals.fp_ui.get("face_enhancer_gpen512", False) and enhance_ok:
                             temp_frame = fp.process_frame(
                                 None, temp_frame, detected_faces=cached_faces
                             )
@@ -1284,6 +2580,19 @@ class _ProcessingWorker(QThread):
                         temp_frame = fp.apply_post_processing(temp_frame, swapped_bboxes)
                     else:
                         temp_frame = fp.process_frame(source_image, temp_frame)
+
+                # Freeze: never show the real face. With no face to swap, repeat
+                # the last swapped frame (black until the first one exists).
+                if modules.globals.freeze_on_face_lost and modules.globals.opacity > 0:
+                    has_identity = (source_image is not None
+                                    or not swapper_models.needs_source(modules.globals.swapper_model))
+                    if cached_faces and has_identity:
+                        last_output = temp_frame.copy()
+                    else:
+                        temp_frame = (last_output.copy() if last_output is not None
+                                      else np.zeros_like(temp_frame))
+                else:
+                    last_output = None
             else:
                 modules.globals.target_path = None
                 for fp in frame_processors:
@@ -1304,23 +2613,64 @@ class _ProcessingWorker(QThread):
                 frame_count = 0
                 prev_time = current_time
 
-            if modules.globals.show_fps:
-                cv2.putText(
-                    temp_frame, f"FPS: {fps:.1f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2,
-                )
+            if self._reproj is not None:
+                # The presenter thread shows / streams; publish and move on.
+                single = (not modules.globals.map_faces and not modules.globals.many_faces
+                          and cached_target_face is not None
+                          and not (modules.globals.freeze_on_face_lost and last_output is not None
+                                   and not cached_faces))
+                self._reproj.publish(seq, temp_frame, cached_target_face if single else None, raw_frame)
+                continue
 
+            # Overlays go on the preview only, never into the virtual camera.
+            overlay = None
+            if modules.globals.show_fps:
+                overlay = [(f"FPS: {fps:.1f}", 30, 1.0)]
+                if modules.globals.tracking_v2 and not modules.globals.map_faces:
+                    overlay.append((
+                        f"Track: {tracker.state} conf {tracker.confidence:.2f} lost {tracker.lost}",
+                        60, 0.6))
+            bboxes = [f.bbox for f in (cached_faces or [])] if not modules.globals.map_faces else None
+            output.send(temp_frame, bboxes, overlay)
+
+        output.close()
+        if detector is not None:
+            detector.stop()
+
+
+class _PresenterWorker(QThread):
+    """Reprojection: shows the last processed face moved onto every new camera frame."""
+
+    def __init__(self, raw_queue, display_queue, stop_event, camera_fps: float,
+                 reprojector: Reprojector):
+        super().__init__()
+        self._rq = raw_queue
+        self._dq = display_queue
+        self._stop = stop_event
+        self._fps = camera_fps
+        self._reproj = reprojector
+
+    def run(self) -> None:
+        stamps = []
+        output = LiveOutput(self._dq, self._fps, update_status)
+        while not self._stop.is_set():
             try:
-                self._pq.put_nowait(temp_frame)
-            except queue.Full:
-                try:
-                    self._pq.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    self._pq.put_nowait(temp_frame)
-                except queue.Full:
-                    pass
+                seq, frame = self._rq.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if modules.globals.live_mirror:
+                frame = gpu_flip(frame, 1)
+            self._reproj.on_raw(seq, frame)
+            out = self._reproj.compose(seq, frame)
+            if out is None:
+                continue
+            now = time.perf_counter()
+            stamps = [t for t in stamps if now - t < 1.0] + [now]
+            overlay = ([(f"FPS: {len(stamps)} (swap {self._reproj.processing_fps:.0f})", 30, 1.0)]
+                       if modules.globals.show_fps else None)
+            bbox = self._reproj.current_bbox()
+            output.send(out, [bbox] if bbox is not None else None, overlay)
+        output.close()
 
 
 class WebcamPreviewWindow(QWidget):
@@ -1337,7 +2687,7 @@ class WebcamPreviewWindow(QWidget):
 
         self._cap = VideoCapturer(camera_index)
         req_w, req_h = modules.globals.capture_resolution
-        if not self._cap.start(req_w, req_h, 60):
+        if not self._cap.start(req_w, req_h, int(modules.globals.capture_fps)):
             update_status("Failed to start camera")
             QTimer.singleShot(0, self.close)
             return
@@ -1352,14 +2702,24 @@ class WebcamPreviewWindow(QWidget):
         self._processed_queue: queue.Queue = queue.Queue(maxsize=2)
         self._stop_event = threading.Event()
 
+        # Reprojection is chosen at Live start (it changes the thread layout).
+        reproj = Reprojector() if modules.globals.reprojection else None
+        raw_queue = queue.Queue(maxsize=2) if reproj is not None else None
+
         self._capture_worker = _CaptureWorker(
-            self._cap, self._capture_queue, self._stop_event
+            self._cap, self._capture_queue, self._stop_event, raw_queue
         )
         self._processing_worker = _ProcessingWorker(
-            self._capture_queue, self._processed_queue, self._stop_event, camera_fps
+            self._capture_queue, self._processed_queue, self._stop_event, camera_fps, reproj
+        )
+        self._presenter_worker = (
+            _PresenterWorker(raw_queue, self._processed_queue, self._stop_event, camera_fps, reproj)
+            if reproj is not None else None
         )
         self._capture_worker.start()
         self._processing_worker.start()
+        if self._presenter_worker is not None:
+            self._presenter_worker.start()
 
         # Poll at ~2x camera fps so we never block but also don't burn CPU.
         poll_ms = max(1, min(16, int(500 / max(camera_fps, 1))))
@@ -1396,7 +2756,7 @@ class WebcamPreviewWindow(QWidget):
         # the stop flag between bounded operations (a camera read, a 50ms queue
         # get, one inference), so waiting terminates; a first-time model load
         # is simply slow, which is what the grace period absorbs quietly.
-        for name in ("_capture_worker", "_processing_worker"):
+        for name in ("_capture_worker", "_processing_worker", "_presenter_worker"):
             worker = getattr(self, name, None)
             if worker is None:
                 continue
@@ -1406,6 +2766,7 @@ class WebcamPreviewWindow(QWidget):
                     flush=True,
                 )
                 worker.wait()
+        virtual_camera.stop()
         # Only now: releasing the capture while the capture thread could still
         # be inside cap.read() is not safe.
         cap = getattr(self, "_cap", None)
@@ -1726,5 +3087,6 @@ def init(
 
     # Route status updates onto the UI thread regardless of caller.
     _BRIDGE.statusChanged.connect(_MAIN.set_status)
+    _MAIN.start_update_check()
 
     return _Window(_APP, _MAIN)
