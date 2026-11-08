@@ -1,6 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
-# cmd.exe misparses LF-only batch files (seen with Cyrillic text): always CRLF.
-*.bat text eol=crlf
-*.cmd text eol=crlf
+# cmd.exe misparses LF-only batch files (seen with Cyrillic text). Stored with CRLF
+# bytes and never normalised: GitHub ZIP downloads ignore eol=crlf.
+*.bat -text
+*.cmd -text
