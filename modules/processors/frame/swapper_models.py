@@ -100,21 +100,10 @@ def ensure_model_file(spec: SwapperSpec, models_dir: str) -> Optional[str]:
         return path
     if not spec.url:
         return None
-    import urllib.request
+    from modules.model_downloader import fetch_url
 
-    print(f"[swapper] downloading {spec.label} ({spec.url}) ...", flush=True)
-    tmp = path + ".part"
-    try:
-        urllib.request.urlretrieve(spec.url, tmp)
-        os.replace(tmp, path)
-        return path
-    except Exception as error:
-        print(f"[swapper] download failed: {error}")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return None
+    print(f"[swapper] downloading {spec.label} ...", flush=True)
+    return fetch_url(spec.url, path)
 
 
 class HyperSwapper:

@@ -59,11 +59,10 @@ def _session(name: str):
             file_name, url = _MODELS[name]
             path = os.path.join(MODELS_DIR, file_name)
             if not os.path.isfile(path):
-                import urllib.request
+                from modules.model_downloader import fetch_url
 
-                print(f"[face_regions] downloading {file_name} ...", flush=True)
-                urllib.request.urlretrieve(url, path + ".part")
-                os.replace(path + ".part", path)
+                if fetch_url(url, path) is None:
+                    raise RuntimeError(f"could not download {file_name}")
             if name == "xseg":
                 path = _xseg_cuda_friendly(path)
             from modules.processors.frame._onnx_enhancer import create_onnx_session

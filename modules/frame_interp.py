@@ -36,12 +36,10 @@ def _get_session():
         if _session is None:
             path = os.path.join(MODELS_DIR, "frame", MODEL_FILE)
             if not os.path.isfile(path):
-                import urllib.request
+                from modules.model_downloader import fetch_url
 
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                print("[interp] downloading rife49.onnx ...", flush=True)
-                urllib.request.urlretrieve(MODEL_URL, path + ".part")
-                os.replace(path + ".part", path)
+                if fetch_url(MODEL_URL, path) is None:
+                    raise RuntimeError(f"could not download {MODEL_FILE}")
             from modules.processors.frame._onnx_enhancer import create_onnx_session
 
             _session = create_onnx_session(path, allow_fp16=False)

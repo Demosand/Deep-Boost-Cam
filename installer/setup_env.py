@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -115,10 +114,10 @@ def install_packages(cc: float) -> bool:
     if not installed("insightface"):
         wheel = os.path.join("_cache", INSIGHTFACE_WHEEL)
         try:
-            if not os.path.isfile(wheel):
-                say("   insightface (готовая сборка) ...")
-                urllib.request.urlretrieve(INSIGHTFACE_URL, wheel + ".part")
-                os.replace(wheel + ".part", wheel)
+            say("   insightface (готовая сборка) ...")
+            from modules.model_downloader import fetch_url
+            if fetch_url(INSIGHTFACE_URL, os.path.abspath(wheel)) is None:
+                raise RuntimeError("download failed")
             pip(wheel)
         except Exception as error:
             say(f"   [!] Готовая сборка недоступна ({error}); собираю из исходников "
@@ -133,13 +132,16 @@ def install_packages(cc: float) -> bool:
 
 
 # ── 3. models ──────────────────────────────────────────────────────────
+FAILED = []
+
+
 def _fetch(url: str, path: str) -> None:
-    if os.path.isfile(path):
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    say(f"   {os.path.relpath(path, ROOT)} ...")
-    urllib.request.urlretrieve(url, path + ".part")
-    os.replace(path + ".part", path)
+    """Retries + Hugging Face mirror; a failed model never stops the install."""
+    from modules.model_downloader import fetch_url
+    if not os.path.isfile(path):
+        say(f"   {os.path.relpath(path, ROOT)} ...")
+    if fetch_url(url, path) is None:
+        FAILED.append(os.path.basename(path))
 
 
 def download_models() -> None:
@@ -168,10 +170,11 @@ def download_models() -> None:
         swaps += ["hyperswap_1a_256", "hyperswap_1c_256", "reswapper_256"]
         sr = list(upscaler.MODELS)
     for name in hf:
-        if md.ensure_model(name) is None:
-            say(f"   [!] не удалось скачать {name} (скачается при первом использовании)")
+        if md.ensure_model(name) is None and md.ensure_model(name) is None:
+            FAILED.append(name)
     for key in swaps:
-        swapper_models.ensure_model_file(swapper_models.BY_KEY[key], MODELS_DIR)
+        if swapper_models.ensure_model_file(swapper_models.BY_KEY[key], MODELS_DIR) is None:
+            FAILED.append(swapper_models.BY_KEY[key].model_file)
     for file_name, url in face_regions._MODELS.values():
         _fetch(url, os.path.join(MODELS_DIR, file_name))
     for key in sr:
@@ -180,6 +183,10 @@ def download_models() -> None:
     if kind == "2":
         _fetch(frame_interp.MODEL_URL, os.path.join(MODELS_DIR, "frame", frame_interp.MODEL_FILE))
     os.makedirs(os.path.join(MODELS_DIR, "dfm"), exist_ok=True)
+    if FAILED:
+        say(f"   [!] Не скачались (плохая связь): {', '.join(FAILED)}.")
+        say("       Это не страшно: запустите установщик ещё раз позже - он докачает только их,")
+        say("       или программа скачает модель сама при первом выборе.")
 
 
 # ── 4. check + config ──────────────────────────────────────────────────

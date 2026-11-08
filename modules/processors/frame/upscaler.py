@@ -58,12 +58,10 @@ def _session(key: str):
         if key not in _sessions:
             path = os.path.join(MODELS_DIR, "frame", spec.file)
             if not os.path.isfile(path):
-                import urllib.request
+                from modules.model_downloader import fetch_url
 
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                print(f"[upscaler] downloading {spec.file} ...", flush=True)
-                urllib.request.urlretrieve(spec.url, path + ".part")
-                os.replace(path + ".part", path)
+                if fetch_url(spec.url, path) is None:
+                    raise RuntimeError(f"could not download {spec.file}")
             from modules.processors.frame._onnx_enhancer import create_onnx_session
 
             _sessions[key] = create_onnx_session(path, allow_fp16=spec.fp16_ok)

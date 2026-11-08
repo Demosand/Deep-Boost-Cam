@@ -180,3 +180,30 @@ def ensure_insightface_pack(name: str = "buffalo_l") -> bool:
     if not ok:
         print(f"[DLC.MODELS] Could not pre-fill '{name}'; insightface will retry.")
     return ok
+
+
+_FF_GITHUB = "https://github.com/facefusion/facefusion-assets/releases/download/"
+
+
+def mirrors(url: str) -> List[str]:
+    """Download sources for url, best first. FaceFusion's GitHub release assets
+    are mirrored on Hugging Face; GitHub's file CDN times out on some networks."""
+    if url.startswith(_FF_GITHUB):
+        tag, file_name = url[len(_FF_GITHUB):].split("/", 1)
+        return [f"https://huggingface.co/facefusion/{tag}/resolve/main/{file_name}", url]
+    return [url]
+
+
+def fetch_url(url: str, target: str, attempts: int = 3) -> Optional[str]:
+    """Download url (or a mirror) to target with retries and resume.
+    Returns target, or None when every source failed (never raises)."""
+    if os.path.isfile(target) and os.path.getsize(target) > 0:
+        return target
+    name = os.path.basename(target)
+    with _lock_for(target):
+        for source in mirrors(url):
+            for _ in range(attempts):
+                if _download(name, source, target, None):
+                    return target
+    print(f"[DLC.MODELS] Could not download {name}; it will be retried on first use.")
+    return None
